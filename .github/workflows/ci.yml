@@ -15,7 +15,7 @@ jobs:
     name: Host tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Compiler version
         run: gcc --version
@@ -27,7 +27,7 @@ jobs:
     name: Test vectors match the generator
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v5
         with:
@@ -55,7 +55,7 @@ jobs:
     name: Protocol layer has no Flipper dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The whole M0 approach rests on src/proto being host-compilable. If a
       # Flipper header or an allocation creeps in, the layer stops being
@@ -80,7 +80,7 @@ jobs:
     name: Build FAP
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Build with ufbt
         id: build
@@ -104,7 +104,7 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: ufbt lint
         uses: flipperdevices/flipperzero-ufbt-action@v0.1
