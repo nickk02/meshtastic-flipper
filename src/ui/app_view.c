@@ -111,7 +111,8 @@ static void draw_nodes(Canvas* canvas, MeshApp* app) {
 static void draw_stats(Canvas* canvas, MeshApp* app) {
     char line[44];
 
-    snprintf(line, sizeof(line), "Source: %s", app->source->name);
+    snprintf(
+        line, sizeof(line), "Src: %s%s", app->source->name, app->source_is_radio ? "" : " (sim)");
     canvas_draw_str(canvas, 2, BODY_TOP, line);
 
     snprintf(
@@ -126,9 +127,10 @@ static void draw_stats(Canvas* canvas, MeshApp* app) {
     snprintf(
         line,
         sizeof(line),
-        "short %lu  notxt %lu",
+        "short %lu notxt %lu crc %lu",
         (unsigned long)app->counters[MESH_ERR_TOO_SHORT],
-        (unsigned long)app->counters[MESH_ERR_NOT_TEXT]);
+        (unsigned long)app->counters[MESH_ERR_NOT_TEXT],
+        (unsigned long)app->crc_errors);
     canvas_draw_str(canvas, 2, BODY_TOP + 2 * ROW_HEIGHT, line);
 
     /* First bytes of the last frame, which is the header. Enough to eyeball

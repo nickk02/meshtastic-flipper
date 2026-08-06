@@ -4,6 +4,7 @@
 
 #include "src/proto/mesh_channel.h"
 #include "src/model/mesh_event.h"
+#include "src/radio/source_radio.h"
 #include "src/radio/source_sim.h"
 #include "src/ui/app_view.h"
 
@@ -52,6 +53,8 @@ static int32_t radio_thread(void* context) {
         message_ring_push(&app->messages, &event);
         node_roster_observe(&app->roster, &event, furi_get_tick());
 
+        if(app->source_is_radio) app->crc_errors = source_radio_crc_errors(app->source);
+
         size_t copy = raw.len < RAW_FRAME_MAX ? raw.len : RAW_FRAME_MAX;
         memcpy(app->last_raw, raw.data, copy);
         app->last_raw_len = copy;
@@ -75,9 +78,10 @@ MeshApp* mesh_app_alloc(void) {
     app->page = PageMessages;
     app->scroll = 0;
 
-    /* Until the SX1262 driver exists, this is the only source. Swapping it is
-     * the whole point of the FrameSource seam. */
-    app->source = source_sim_alloc(SIM_INTERVAL_MS);
+    /* Prefer the radio. mesh_app_run falls back to simulation if it does not
+     * answer, so the app is useful with or without the board attached. */
+    app->source = source_radio_alloc();
+    app->source_is_radio = true;
 
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     app->view_port = view_port_alloc();
@@ -90,6 +94,16 @@ MeshApp* mesh_app_alloc(void) {
     return app;
 }
 
+static void free_source(MeshApp* app) {
+    if(app->source == NULL) return;
+    if(app->source_is_radio) {
+        source_radio_free(app->source);
+    } else {
+        source_sim_free(app->source);
+    }
+    app->source = NULL;
+}
+
 void mesh_app_free(MeshApp* app) {
     if(app == NULL) return;
 
@@ -98,7 +112,7 @@ void mesh_app_free(MeshApp* app) {
     view_port_free(app->view_port);
     furi_message_queue_free(app->input_queue);
 
-    source_sim_free(app->source);
+    free_source(app);
     furi_mutex_free(app->mutex);
     free(app);
 }
@@ -116,7 +130,17 @@ void mesh_app_run(MeshApp* app) {
     InputEvent event;
 
     app->running = true;
+
     app->source_started = app->source->start(app->source);
+    if(!app->source_started && app->source_is_radio) {
+        /* No radio answered. Rather than presenting an empty screen that looks
+         * identical to a misconfigured radio, drop to simulation and say so. */
+        FURI_LOG_W("MeshApp", "no SX1262 detected, falling back to simulation");
+        free_source(app);
+        app->source = source_sim_alloc(SIM_INTERVAL_MS);
+        app->source_is_radio = false;
+        app->source_started = app->source->start(app->source);
+    }
 
     app->thread = furi_thread_alloc_ex("MeshRadio", 2048, radio_thread, app);
     furi_thread_start(app->thread);
