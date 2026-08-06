@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, for example v0.1.0-m0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A release that skipped its tests is worse than no release, so the FAP
+      # is only built after the suite passes on the same commit.
+      - name: Host tests
+        run: bash test/host/run_tests.sh
+
+      - name: Build with ufbt
+        id: build
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
+        with:
+          sdk-channel: release
+
+      - name: Collect artifacts
+        id: collect
+        run: |
+          mkdir -p release
+          cp ${{ steps.build.outputs.fap-artifacts }} release/
+          ls -l release/
+          {
+            echo "size=$(stat -c%s release/meshtastic.fap)"
+            echo "api=${{ steps.build.outputs.api-version }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: release/*.fap
+          generate_release_notes: true
+          prerelease: true
+          body: |
+            Built against official firmware, release channel, API ${{ steps.collect.outputs.api }}.
+            `meshtastic.fap` is ${{ steps.collect.outputs.size }} bytes.
+
+            Install by copying `meshtastic.fap` to `apps/Tools/` on the SD card.
+            It appears under Apps, Tools, Meshtastic.
+
+            Custom firmware such as Momentum, Unleashed or RogueMaster may
+            reject it with an API mismatch, in which case it needs rebuilding
+            against that SDK.
+
+            This project is receive-only and needs an external SX1262 module.
+            The Flipper's built-in CC1101 cannot demodulate LoRa, so a stock
+            Flipper running this will not hear Meshtastic traffic.

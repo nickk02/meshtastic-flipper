@@ -1,5 +1,7 @@
 App(
-    appid="meshtastic_flipper",
+    # appid names the built artifact, so this produces meshtastic.fap.
+    # The repo is meshtastic-flipper; the app on the device is just Meshtastic.
+    appid="meshtastic",
     name="Meshtastic",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="meshtastic_flipper_app",
