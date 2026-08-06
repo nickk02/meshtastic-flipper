@@ -1,25 +1,25 @@
 # Can a Flipper Zero FAP be a full Meshtastic node?
 
-Date: 2026-08-05
+Date: 2026-08-05. Memory figures updated 2026-08-06 with measured values.
 
-Written because the project's stated end goal ("an app on my Flipper that makes
-it a Meshtastic node I can connect to my phone") conflicts with the project
-brief, which puts the phone API, direct messages, position, telemetry and
-routing explicitly out of scope.
+The project owner asked for "an app on my Flipper that makes it a Meshtastic
+node I can connect to my phone". The project brief puts the phone API, direct
+messages, position, telemetry and routing out of scope. This document explains
+which is achievable.
 
-Conclusion up front: **no, not as a FAP.** The blocker is not Bluetooth and not
-protocol complexity. It is that a FAP is RAM-resident and Meshtastic is roughly
-an order of magnitude too large to live in RAM.
+The answer is no, not as a FAP. Bluetooth is not the blocker. Protocol
+complexity is not the blocker. A FAP runs from RAM, and Meshtastic is about
+eight times too large to fit there.
 
-There is a path to a real Meshtastic node on Flipper *hardware*, covered in
-section 5, but it stops being a Flipper.
+Section 5 covers a path to a real Meshtastic node on Flipper hardware. That
+path stops being a Flipper.
 
 ## 1. Where I was wrong
 
-I initially claimed the Flipper's Bluetooth stack was "barely reachable from an
-app." That is incorrect and I am correcting it on the record.
+I first claimed that a Flipper app can barely reach the Bluetooth stack. That
+is wrong. I am correcting it here.
 
-`furi_hal_bt.h:86` exposes:
+`furi_hal_bt.h:86` declares:
 
 ```c
 FuriHalBleProfileBase* furi_hal_bt_start_app(
@@ -28,53 +28,46 @@ FuriHalBleProfileBase* furi_hal_bt_start_app(
     ...);
 ```
 
-It takes a **custom profile template**, so an application genuinely can stand up
-its own GATT service with its own UUIDs and characteristics. Implementing the
-Meshtastic BLE service (a `ToRadio` write characteristic, a `FromRadio` read
-characteristic, and a `FromNum` notify characteristic) is possible in principle.
+It accepts a custom profile template. An app can therefore create its own GATT
+service, with its own UUIDs and characteristics. The Meshtastic BLE service
+needs three: a `ToRadio` write characteristic, a `FromRadio` read
+characteristic, and a `FromNum` notify characteristic. An app can create all
+three.
 
-So Bluetooth transport is not the reason this fails. Something else is.
+Bluetooth transport is not why this fails.
 
-## 2. The actual blocker: FAPs live in RAM
+## 2. The blocker: a FAP runs from RAM
 
-This is the whole argument, and it is structural rather than a matter of
-optimization.
+This is the whole argument. It is structural. No amount of optimization changes
+it.
 
-**Real Meshtastic runs from flash.** On ESP32 and nRF52 targets the firmware
-image is on the order of 1MB, stored in flash and executed in place. Only its
-mutable data occupies RAM.
+Real Meshtastic runs from flash. On ESP32 and nRF52 targets the firmware image
+is about 1MB. It sits in flash and executes in place. Only its mutable data
+uses RAM.
 
-**A Flipper FAP runs from RAM.** The `.fap` is an ELF that the loader reads off
-the SD card, relocates, and places in the heap at launch. Its code, its
-read-only data and its mutable data all consume heap. There is no execute in
-place, and no way to ask for one.
+A Flipper FAP runs from RAM. The loader reads the `.fap` off the SD card,
+relocates it, and places it in the heap. Its code, its constants and its data
+all consume heap. There is no execute in place, and no way to request one.
 
-The RAM available is fixed by the linker script,
+The linker script fixes the available RAM,
 `targets/f7/stm32wb55xx_flash.ld:8-12`:
 
 | Region | Size | Purpose |
 | --- | --- | --- |
-| `RAM1` | `0x2FFF8`, 196,600 bytes (192KB) | Everything the application core does |
+| `RAM1` | `0x2FFF8`, 196,600 bytes | Everything the application core does |
 | `RAM2A` | 10KB | BLE core mailbox and shared memory |
 | `RAM2B` | 10KB | BLE core |
 
-192KB is the ceiling for firmware code data, firmware stacks, the heap, and any
-FAP loaded into it. Free heap with the system running is a fraction of that.
-Task 1 of the M0 plan measures the real figure on the device.
+Measurement on hardware, 2026-08-06: total heap 187,448 bytes, free heap
+128,728 bytes with an app running. See `docs/measurements.md`.
 
-So the comparison is roughly **1MB of flash-resident code versus 128KB of free
-heap**. That is a factor of eight. Nothing is recoverable by trimming features,
-because the gap is not in the features.
+So the comparison is about 1MB of flash-resident code against about 128KB of
+heap. That is a factor of eight. The gap is not in the features, so trimming
+features does not close it.
 
-The 128KB figure is now measured rather than estimated. On hardware, 2026-08-06:
-total heap 187,448 bytes, free heap 128,728 with an app running. See
-`docs/measurements.md`. The earlier working estimate of roughly 100KB was
-conservative by about 28 percent, which changes the multiple but not the
-conclusion.
+## 3. How much code a full node is
 
-## 3. How much code a full node actually is
-
-Measured against the sparse checkout of `meshtastic/firmware`, `src/mesh` only:
+Measured from a sparse checkout of `meshtastic/firmware`, `src/mesh` only:
 
 | Component | Lines |
 | --- | --- |
@@ -87,79 +80,87 @@ Measured against the sparse checkout of `meshtastic/firmware`, `src/mesh` only:
 | `ReliableRouter.cpp` | 207 |
 | `aes-ccm.cpp` | 180 |
 | `FloodingRouter.cpp` | 174 |
-| **All of `src/mesh`** | **44,648** |
+| All of `src/mesh` | 44,648 |
 
-And `src/mesh` is not the whole node. It excludes `src/modules` (position,
-telemetry, admin, canned messages, and the rest), the generated nanopb protobuf
-code for the full message set, and the platform layers.
+`src/mesh` is not the whole node. It excludes `src/modules`, which holds
+position, telemetry, admin and canned messages. It excludes the generated
+protobuf code for the full message set. It excludes the platform layers.
 
-For scale, the receive-and-display slice this project actually builds is a few
-hundred lines. The brief drew its line at exactly the right place, and named the
-reason: `NodeDB.cpp` at 4,467 lines and `Router.cpp` at 1,566 lines are the
-boundary between "receive and display" and "be a node."
+For scale: the receive and display slice this project builds is a few hundred
+lines.
 
-Even on a deliberately generous estimate of compiled ARM Thumb-2 density, tens
-of thousands of lines of C++ produces hundreds of kilobytes of code. Set against
-a measured ceiling of about 128KB of free heap, the arithmetic does not work at
-any plausible density. This is why no amount of careful engineering closes it.
+Compiled ARM Thumb-2 code from tens of thousands of lines of C++ runs to
+hundreds of kilobytes, even on a generous estimate. The measured ceiling is
+about 128KB of heap. The arithmetic does not work at any plausible code
+density.
 
-## 4. What each capability would additionally require
+The brief drew its scope line at the right place, and named the reason:
+`NodeDB.cpp` at 4,467 lines and `Router.cpp` at 1,566 lines separate "receive
+and display" from "be a node".
 
-Even setting size aside, for completeness:
+## 4. What each capability needs
+
+Set size aside for a moment. This is what each feature would still require.
 
 | Capability | Requires |
 | --- | --- |
-| Appear in others' node lists | Periodic `NodeInfo` broadcast. Protobuf encode. Small. |
-| Send text on primary channel | Transmit path. Already M4 in the plan. |
-| Receive direct messages | X25519 key exchange and AES-CCM. `CryptoEngine` PKI paths plus key storage. |
-| Position and telemetry | The module system, GPS or fake position, `NodeDB` entries. |
-| Relay traffic for others | `Router` plus `PacketHistory` for duplicate suppression. Real airtime and battery cost. |
-| Phone app connection | `PhoneAPI` (2,199 lines), the full config and admin protobuf set, `NodeDB` for the node list the app displays, and a custom BLE GATT service. |
+| Appear in other nodes' node lists | A periodic `NodeInfo` broadcast. Protobuf encoding. Small. |
+| Send text on the primary channel | A transmit path. Already planned for M4. |
+| Receive direct messages | X25519 key exchange and AES-CCM. The `CryptoEngine` PKI paths, plus key storage. |
+| Report position and telemetry | The module system, a GPS or a fixed position, and `NodeDB` entries. |
+| Relay traffic for others | `Router`, plus `PacketHistory` to suppress duplicates. Real airtime and battery cost. |
+| Connect to the phone app | `PhoneAPI` at 2,199 lines, the full config and admin protobuf set, `NodeDB` for the node list, and a custom BLE GATT service. |
 
-The phone connection is the most demanding item on the list, not the least. The
-phone app does not just read messages, it reads and writes the node's entire
+The phone connection is the most demanding item, not the least. The phone app
+does not only read messages. It reads and writes the node's whole
 configuration and node database.
+
+The handshake is also all or nothing. On connect the app sends a
+`want_config_id`. It then expects a full sequence in reply: MyNodeInfo, the
+node's own NodeInfo, every Config block, every ModuleConfig block, all
+Channels, and a completion marker. A partial implementation does not half
+work. The app fails to connect.
 
 ## 5. The one real path to a full node on Flipper hardware
 
-Flash Meshtastic firmware onto the STM32WB55 in place of Flipper OS.
+Flash Meshtastic firmware onto the STM32WB55, in place of Flipper OS.
 
-Meshtastic's repository now contains a `zephyr/` directory. It is embryonic, one
-`prj.conf` and a single nRF54L15 board overlay, but the configuration is written
-to be shared across future Zephyr targets. Zephyr supports the STM32WB55
-natively. If that port matures, running real Meshtastic on Flipper hardware
-becomes a board bringup problem rather than a rewrite, and the flash-resident
-constraint disappears because it would be the firmware.
+The Meshtastic repository now contains a `zephyr/` directory. Today it holds
+one `prj.conf` and a single nRF54L15 board overlay, so it is embryonic. The
+configuration is written to be shared across future Zephyr targets. Zephyr
+supports the STM32WB55 natively.
 
-The cost is total: the device stops being a Flipper. No sub-GHz app, no NFC, no
+If that port matures, running Meshtastic on Flipper hardware becomes a board
+bring-up problem rather than a rewrite. The flash-resident constraint
+disappears, because Meshtastic would be the firmware.
+
+The cost is total. The device stops being a Flipper. No sub-GHz app, no NFC, no
 infrared, no BadUSB, no app catalog. You would own a Meshtastic node in a
-Flipper-shaped case, and you would still need to add the SX1262, because the
-CC1101 cannot do LoRa.
+Flipper-shaped case. You would still need to add an SX1262, because the CC1101
+cannot demodulate LoRa.
 
-This is worth checking again before committing significant time past M3, which
-is what the brief's watch item already says.
+Check the state of that port before committing significant time past M3.
 
 ## 6. The comparison worth making
 
-A Heltec V3 or similar is roughly 30 USD, is a full Meshtastic node out of the
-box, pairs with the phone app, and works today.
+A Heltec V3 or similar costs about 30 USD. It is a full Meshtastic node out of
+the box. It pairs with the phone app. It works today.
 
-The Flipper version costs about 35 USD for the Electronic Cats add-on, plus a
-logic analyzer, plus weeks of work, and lands somewhere well short of that.
+The Flipper version costs about 35 USD for the Electronic Cats add-on, plus an
+antenna, plus a logic analyzer, plus weeks of work. It lands well short of
+that.
 
-That is not an argument against building it. It is an argument that the reason
-to build it has to be "I want the Flipper to do this" rather than "I need a
-Meshtastic node," because for the second one the answer is already on the desk.
+This is not an argument against building it. It is an argument that the reason
+to build it must be "I want the Flipper to do this". If the reason is "I need a
+Meshtastic node", the answer is already on the desk.
 
 ## 7. Recommendation
 
-Build the receiver in the spec. It is achievable, it is genuinely useful, and it
-makes the Flipper do something it cannot currently do.
+Build the receiver the spec describes. It is achievable. It is useful. It makes
+the Flipper do something it cannot do today.
 
-If M3 lands and the size numbers come in better than expected, the honest
-stretch is transmit plus `NodeInfo` broadcast, which would make the Flipper
-visible to other nodes as a minimal participant. That is the realistic ceiling
-for a FAP, and it is worth aiming at.
+If M3 lands and the size numbers allow, add transmit and a `NodeInfo`
+broadcast. Other nodes would then list the Flipper as a minimal participant.
+That is the realistic ceiling for a FAP, and it is worth aiming at.
 
-Phone connectivity is not on that ladder, and no amount of scoping gets it
-there.
+Phone connectivity is not on that ladder. No amount of scoping puts it there.
