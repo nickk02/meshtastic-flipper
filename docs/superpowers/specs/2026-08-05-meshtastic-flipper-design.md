@@ -12,11 +12,39 @@ payload, and displays text messages and heard nodes on the Flipper screen.
 This is a partial reimplementation of the Meshtastic protocol against FuriHAL.
 It is not a port of the Meshtastic firmware.
 
+### Delivery target: FAP, confirmed
+
+Ships as a `.fap` installed from the app catalog, not as a custom firmware
+build. Decided deliberately after weighing the alternative.
+
+An app compiled into the firmware would execute from flash instead of the heap,
+which raises the size ceiling. The ElectronicCats LoRa project does exactly that
+via `applications_user/`. It was rejected because it requires the user to flash
+custom firmware and give up official updates, against a one-tap install. The
+receive path is small enough that the FAP ceiling is not binding.
+
+Consequence to design against: **a FAP is RAM-resident.** Every section,
+including `.text`, is heap-allocated by the loader at
+`lib/flipper_application/elf/elf_file.c:488`, and the FAP linker script
+`targets/f7/application_ext.ld` links at address zero with everything
+relocatable. Code size competes directly with runtime heap. This is why binary
+size is the scarcest resource in the project.
+
 ### Out of scope
 
 PKI direct messages, position, telemetry, MQTT, store and forward, admin
 messages, config over radio, canned messages, the phone API. If a task appears
 to require any of these, stop and ask rather than expanding scope.
+
+**Phone connectivity is confirmed out of scope**, accepted by the project owner
+rather than merely inherited from the brief. The full reasoning, including
+measured line counts and the RAM versus flash argument, is in
+`docs/feasibility-full-node.md`. Summary: real Meshtastic firmware is roughly
+1MB and flash-resident, a FAP gets on the order of 100KB of heap, and the phone
+API additionally needs `PhoneAPI.cpp` (2,199 lines), `NodeDB.cpp` (4,467 lines)
+and the full config and admin protobuf set. Bluetooth itself is not the
+obstacle: `furi_hal_bt_start_app` accepts a custom profile template, so a FAP
+can register its own GATT service.
 
 Transmit is a stretch goal for M4 only. M0 through M3 are receive only.
 
@@ -390,12 +418,23 @@ Wire M0's already proven `proto` layer into the RX path.
   text on the Flipper.
 - Report FAP binary size and peak heap here.
 
-### M4: roster, and TX if size allows
+### M4: roster, TX, and minimal node presence if size allows
 
 Track heard nodes with SNR and RSSI in a fixed 32 entry in-memory array. No
 persistence, no NodeDB. Broadcast text to the primary channel.
 
 - Acceptance: the reference node receives a message sent from the Flipper.
+
+**Stretch, only if the M3 size report leaves room:** periodic `NodeInfo`
+broadcast so the Flipper appears in other nodes' node lists rather than being a
+silent listener that occasionally speaks. This requires protobuf *encoding*,
+which M0 through M3 do not build, since the receive path only decodes.
+
+That is the realistic ceiling for a FAP. It makes the Flipper a genuine if
+minimal mesh participant: it hears, it speaks, and it announces itself.
+Everything past that point (direct messages, position, telemetry, relaying for
+others, phone connectivity) is ruled out on size. See
+`docs/feasibility-full-node.md`.
 
 ## 9. Testing strategy
 
