@@ -189,28 +189,63 @@ because an MIT licensed driver already exists for this exact board.
 
 ### Pin map, as fixed by the board
 
-Read from `ElectronicCats/flipper-SX1262-LoRa`, `lora.c:31-36`.
+Read from `ElectronicCats/flipper-SX1262-LoRa` `lora.c:30-36` and cross-checked
+against the board's own KiCad schematic and BOM in
+`ElectronicCats/flipper-shields`, `FLIPPER_Subg/`.
 
-| Signal | MCU pin | Header pin |
-| --- | --- | --- |
-| MOSI | PA7 | 2 |
-| MISO | PA6 | 3 |
-| CS (NSS0, SX1262) | PA4 | 4 |
-| SCK | PB3 | 5 |
-| DIO1 | PC3 | 7 |
-| NRST | PC1 | 15 |
-| CS (NSS1, second device) | PC0 | 16 |
-| BUSY | PB7 | 14 |
-| GND | - | 8 |
-| 3V3 | - | 9 |
+| Signal | MCU pin | Header pin | Notes |
+| --- | --- | --- | --- |
+| MOSI | PA7 | 2 | |
+| MISO | PA6 | 3 | |
+| CS, NSS0 | PA4 | 4 | **Not the SX1262.** See below. |
+| SCK | PB3 | 5 | |
+| DIO1 | PC3 | 7 | SX1262 interrupt |
+| ANT\_SW | PB6 | 13 | Board antenna switch. See below. |
+| BUSY | PB7 | 14 | |
+| NRST | PC1 | 15 | |
+| **CS, NSS1, SX1262** | **PC0** | **16** | The SX1262 chip select |
+| GND | - | 8 | |
+| 3V3 | - | 9 | |
 
-This differs from the brief in one place. The brief proposes BUSY on PB2, header
-pin 6. The board routes BUSY to `gpio_usart_rx`, which is PB7 on header pin 14.
-The board layout wins.
+Two departures from the brief's proposed wiring, both fixed by the PCB:
 
-The board also needs two chip selects. The driver handles this by copying
+**BUSY is PB7, header pin 14**, not PB2 on pin 6. The board routes it to
+`gpio_usart_tx`'s neighbour `gpio_usart_rx`.
+
+**The SX1262 chip select is PC0, header pin 16, not PA4.** This is the trap. The
+brief and an obvious reading of the pin names both suggest NSS0 on PA4 is the
+LoRa radio. It is not. In the reference driver `pin_nss1` (PC0) appears 56 times
+and wraps every single SX1262 transaction, while `pin_nss0` (PA4) appears three
+times: declared, initialised as an output, and written low once at startup
+(`lora.c:1029-1034`). PA4 belongs to the board's second CC1101.
+
+Driving PA4 as the SX1262 select would talk to the wrong chip and M1 would fail
+with no useful diagnostic.
+
+The board needs two chip selects on one bus. The driver handles this by copying
 `furi_hal_spi_bus_handle_external` into a mutable handle and overriding the CS
 pin per device (`lora.c:1014-1019`).
+
+### Two RF switches, only one of which is automatic
+
+The board has a Peregrine PE42421 SPDT RF switch (BOM item 27) on the net
+`ANT_SW`, wired to PB6, header pin 13. It selects which radio reaches the
+antenna.
+
+The reference driver **declares `pin_ant_sw` and never drives it**
+(`lora.c:34`, one occurrence in the whole file). So either the switch defaults
+to the SX1262 path when the line floats, or their receive path works by luck of
+the default state. This is unresolved and is an M1 task: drive PB6 both ways
+and record which state lets packets through. It is a prime candidate for a
+silent M2 failure.
+
+Separately, the SX1262's own transmit and receive switching is handled by the
+chip. The driver issues `SetDIO2AsRfSwitchCtrl`, opcode `0x9D`, with enable
+(`lora.c:348`). That resolves the brief's open question 5: no external TXEN and
+RXEN lines are needed, and no GPIO is spent on them.
+
+PA14 (header pin 10, SWCLK) is used by the reference driver as a beacon LED
+output. Not needed here.
 
 ### Electrical
 
@@ -237,16 +272,43 @@ is 5V. Read the limits off the official GPIO documentation by hand before M4,
 where transmit makes them load bearing. They do not matter for M0 through M3,
 which are receive only.
 
-### Unresolved before purchase
+### Resolved from the board design files
 
-- Antenna connector type, and whether a 915MHz antenna is included. Not
-  confirmed by any source read so far. Confirm with the vendor.
-- Whether the SX1262 RF front end is matched for 915 rather than 868. The
-  driver exposes US915 and EU868 menu options, which suggests 915 is intended,
-  but that is software rather than an RF matching claim.
-- One third party retailer lists the chip as an SX1272. Both the Electronic Cats
-  store and the driver source say SX1262, and the driver is SX126x throughout.
-  The retailer listing is treated as a typo, not as a conflict.
+All settled by reading `ElectronicCats/flipper-shields`, `FLIPPER_Subg/`, which
+is the published KiCad project and BOM. Product pages and reseller listings were
+not treated as authoritative, and were wrong in two places.
+
+**The chip is an SX1262.** BOM item 23 is `U1 = SX1262IMLTRT`. Electronic Cats'
+own `FLIPPER_Subg/README.md` says "SX1272", and at least one reseller repeats
+it. That is a documentation typo in the vendor's README, contradicted by their
+own BOM, schematic symbol and driver, all of which are SX126x.
+
+**The antenna connector is U.FL, and there are two of them.** BOM items 2 and 3,
+`AE3` and `AE4`, both Hirose `U.FL-R-SMT-180`. Items 1, `AE1` and `AE2`, are PCB
+trace antenna footprints using the Texas SWRA416 868/915MHz reference design,
+and both are marked **DNP**, do not populate.
+
+Consequence for ordering: the board ships with no usable antenna of its own. It
+needs either a 915MHz antenna terminated in U.FL, or a U.FL to SMA pigtail plus
+an SMA antenna. U.FL is a small snap-fit coax connector rated for very few
+mating cycles, so a pigtail is the kinder option if the antenna will come on and
+off.
+
+**The RF front end is matched for 915, not 868.** BOM item 26 is a Johanson
+`0915BM15A0001E` balun, which is the 915MHz part, and item 25 is a Johanson
+`0900FM15D0039E` 900MHz band filter. That is a hardware answer, unlike the
+driver's US915 and EU868 menu entries, which are only software.
+
+**No soldering.** `J1` is a 1x10 socket and `J2` a 1x08 socket, both 2.54mm
+vertical (BOM items 13 and 14). The board seats on the Flipper GPIO header.
+
+### Still to buy alongside the board
+
+- A 915MHz antenna with a U.FL lead, or a U.FL to SMA pigtail and an SMA
+  antenna.
+- A USB logic analyzer. Any of the cheap 8 channel clones works with PulseView.
+  Without one, M1's kill condition cannot be evaluated: a silent bus and a
+  correct bus with wrong driver code look identical from software.
 
 ## 4. Architecture
 
