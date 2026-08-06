@@ -117,3 +117,35 @@ None. `docs/feasibility-full-node.md` argued that roughly 1MB of flash-resident
 Meshtastic firmware cannot fit in a RAM-resident FAP. The measured ceiling is
 128KB rather than the estimated 100KB, so the gap is about eightfold instead of
 tenfold. The conclusion is unchanged.
+
+## FAP size as the app grew
+
+Measured on each release build. The ceiling is free heap, 128,728 bytes, since
+a FAP is loaded into the heap rather than run from flash.
+
+| Release | Contents | Bytes | Share of free heap |
+| --- | --- | --- | --- |
+| v0.1.0-m0 | protocol core, heap measurement, decode self test | 6,120 | 4.8% |
+| v0.2.0-app | plus models, three views, threading, simulated source | 11,400 | 8.9% |
+| v0.3.0-radio | plus SX1262 driver and LoRa configuration | 19,580 | 15.2% |
+
+Binary size was named in the brief as the scarcest resource in the project.
+Measurement says otherwise: the complete receiver, radio driver included, uses
+about a seventh of the available heap. Nothing has had to be traded away for
+size, and nothing looks likely to.
+
+## Radio parameters, derived and tested
+
+Not measured on hardware, but derived from the Meshtastic source and checked
+against an independently known result, which is the strongest available check
+short of a radio.
+
+| | Value | Source |
+| --- | --- | --- |
+| Frequency | 906.875 MHz | derived, matches documented US LongFast |
+| Frequency slot | 19, channel 20 | djb2("LongFast") mod 104 |
+| Spreading factor | 11 | `MeshRadio.h:282-287` |
+| Bandwidth | 250 kHz | `MeshRadio.h:282-287` |
+| Coding rate | 4/5 | `MeshRadio.h:282-287` |
+| Sync word registers | 0x0740 = 0x24, 0x0741 = 0xB4 | nibble split of 0x2b |
+| Low data rate optimize | off | symbol 8.192ms, below the 16ms threshold |
