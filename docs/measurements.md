@@ -58,17 +58,55 @@ silent wrongness is hardest to diagnose.
 `src/proto/` includes only `stdbool.h`, `stddef.h`, `stdint.h`, `string.h`,
 `aes.h`, and its own headers. No Flipper headers, no allocation.
 
-## Device measurements
+## Device measurements, 2026-08-06
 
-**Not yet taken.** Task 1 of the M0 plan requires a Flipper connected by USB and
-has not been run. Pending numbers:
+Taken on hardware. These replace the estimates used earlier.
 
-- ufbt SDK target version, to pin the build
-- Empty FAP size
-- Free heap with the app running
-- Total heap
+| | Bytes | |
+| --- | --- | --- |
+| Total heap | 187,448 | ~183KB |
+| Free heap, app running | 128,728 | ~126KB |
+| Minimum ever free since boot | 2,784 | ~2.7KB |
+| `meshtastic.fap` | 6,120 | ~6KB |
 
-Free heap is the practical ceiling for everything the app allocates at runtime,
-and since a FAP is loaded into the heap, code size competes with it directly.
-The figure of roughly 100KB used in `feasibility-full-node.md` is an estimate
-until this is run.
+ufbt SDK target: **1.4.3**, release channel, f7, API 87.1.
+
+**Decode core self test: PASS.** The full chain, header parse through channel
+key expansion, AES128-CTR decrypt and protobuf decode, produces the exact
+expected text on the device. The protocol layer is confirmed correct on ARM as
+well as x86, so only the radio remains unproven.
+
+### What the numbers mean
+
+**Size is not the constraint I expected.** The FAP is 6,120 bytes against
+128,728 free, which is under 5 percent. My working estimate had been roughly
+100KB free; the real figure is about 28 percent higher. There is ample room for
+the SX1262 driver, the RX thread and the UI.
+
+For context on where the RAM goes: `RAM1` is 196,600 bytes
+(`stm32wb55xx_flash.ld:10`), of which 187,448 is heap. The remainder is the
+firmware's static data and stacks. With the system idle and this app running,
+firmware and services occupy roughly 59KB of that heap.
+
+**The watermark deserves attention.** `memmgr_get_minimum_free_heap` is
+`xPortGetMinimumEverFreeHeapSize` (`furi/core/memmgr.c:58-60`), the lowest free
+heap since boot. A reading of 2,784 bytes means the device came within about
+2.7KB of exhausting its heap at some point in that session.
+
+This does not threaten the current design, which allocates nothing in the
+receive path and keeps under 5KB of static state. It does mean **128KB is the
+quiet-state figure, not a guarantee**. Something on the device, most likely the
+app loader relocating a FAP or a service loading assets, can transiently
+consume nearly all of it.
+
+Practical consequence: keep allocating nothing on the hot path, and do not size
+future buffers against 128KB as though it were always available. Worth
+re-reading the watermark after a clean reboot to establish a baseline, since
+this reading includes whatever happened during install over USB.
+
+### Effect on the full-node feasibility argument
+
+None. `docs/feasibility-full-node.md` argued that roughly 1MB of flash-resident
+Meshtastic firmware cannot fit in a RAM-resident FAP. The measured ceiling is
+128KB rather than the estimated 100KB, so the gap is about eightfold instead of
+tenfold. The conclusion is unchanged.

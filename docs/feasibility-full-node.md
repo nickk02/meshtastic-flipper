@@ -62,10 +62,15 @@ The RAM available is fixed by the linker script,
 FAP loaded into it. Free heap with the system running is a fraction of that.
 Task 1 of the M0 plan measures the real figure on the device.
 
-So the comparison is roughly **1MB of flash-resident code versus something
-under 192KB of shared RAM**, and realistically closer to 100KB of free heap.
-That is a factor of ten. Nothing is recoverable by trimming features, because
-the gap is not in the features.
+So the comparison is roughly **1MB of flash-resident code versus 128KB of free
+heap**. That is a factor of eight. Nothing is recoverable by trimming features,
+because the gap is not in the features.
+
+The 128KB figure is now measured rather than estimated. On hardware, 2026-08-06:
+total heap 187,448 bytes, free heap 128,728 with an app running. See
+`docs/measurements.md`. The earlier working estimate of roughly 100KB was
+conservative by about 28 percent, which changes the multiple but not the
+conclusion.
 
 ## 3. How much code a full node actually is
 
