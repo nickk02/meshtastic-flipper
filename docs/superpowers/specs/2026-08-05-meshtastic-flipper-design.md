@@ -40,7 +40,8 @@ to require any of these, stop and ask rather than expanding scope.
 rather than merely inherited from the brief. The full reasoning, including
 measured line counts and the RAM versus flash argument, is in
 `docs/feasibility-full-node.md`. Summary: real Meshtastic firmware is roughly
-1MB and flash-resident, a FAP gets on the order of 100KB of heap, and the phone
+1MB and flash-resident, a FAP gets about 128KB of heap (measured, see
+`docs/measurements.md`), and the phone
 API additionally needs `PhoneAPI.cpp` (2,199 lines), `NodeDB.cpp` (4,467 lines)
 and the full config and admin protobuf set. Bluetooth itself is not the
 obstacle: `furi_hal_bt_start_app` accepts a custom profile template, so a FAP

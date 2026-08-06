@@ -1,0 +1,19 @@
+# Normalize line endings in the repository.
+* text=auto
+
+# ufbt rewrites .clang-format with LF on every lint or format run. Without
+# this, a CRLF checkout on Windows makes the file show as modified after every
+# run, which is pure noise.
+.clang-format text eol=lf
+
+# Shell scripts must be LF. CI runs run_tests.sh on Linux, where a CRLF
+# shebang line fails with a confusing "bad interpreter" error.
+*.sh text eol=lf
+
+# Generated and vendored C sources stay LF so diffs are stable across
+# platforms.
+*.c text eol=lf
+*.h text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
