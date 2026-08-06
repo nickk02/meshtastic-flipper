@@ -1,9 +1,11 @@
 #include "src/app.h"
 
+#include <furi_hal_version.h>
 #include <string.h>
 
 #include "src/proto/mesh_channel.h"
 #include "src/model/mesh_event.h"
+#include "src/ble/meshtastic_profile.h"
 #include "src/radio/source_radio.h"
 #include "src/radio/source_sim.h"
 #include "src/ui/app_view.h"
@@ -83,6 +85,17 @@ MeshApp* mesh_app_alloc(void) {
     app->source = source_radio_alloc();
     app->source_is_radio = true;
 
+    /* Node identity. Derived from the Flipper's own BLE MAC so two Flippers
+     * running this do not claim the same node number. The top bit is cleared
+     * because Meshtastic treats the high range as reserved. */
+    const uint8_t* mac = furi_hal_version_get_ble_mac();
+    uint32_t node_num =
+        ((uint32_t)mac[0] << 24 | (uint32_t)mac[1] << 16 | (uint32_t)mac[2] << 8 | mac[3]) &
+        0x7FFFFFFFu;
+    PhoneIdentity identity;
+    phone_identity_init(&identity, node_num, "Flipper Mesh", "FLPR");
+    app->ble = meshtastic_ble_start(&identity);
+
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     app->view_port = view_port_alloc();
     view_port_draw_callback_set(app->view_port, app_view_draw, app);
@@ -111,6 +124,8 @@ void mesh_app_free(MeshApp* app) {
     furi_record_close(RECORD_GUI);
     view_port_free(app->view_port);
     furi_message_queue_free(app->input_queue);
+
+    if(app->ble) meshtastic_ble_stop(app->ble);
 
     free_source(app);
     furi_mutex_free(app->mutex);

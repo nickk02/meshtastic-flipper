@@ -31,7 +31,10 @@ INCLUDES="-I. -I$ROOT -I$ROOT/src/proto -I$ROOT/src/model -I$ROOT/lib/tiny-AES-c
 # leave the vendored sources byte-identical to upstream.
 AES_DEFINES="-DCBC=0 -DECB=0 -DCTR=1"
 
-PROTO_SRC=$(ls "$ROOT"/src/proto/*.c "$ROOT"/src/model/*.c "$ROOT"/src/radio/lora_config.c 2>/dev/null || true)
+# src/radio/lora_config.c and src/ble/meshtastic_handshake.c are named
+# explicitly rather than globbing their directories, because the other
+# files there use the Flipper HAL and cannot build here.
+PROTO_SRC=$(ls "$ROOT"/src/proto/*.c "$ROOT"/src/model/*.c "$ROOT"/src/radio/lora_config.c "$ROOT"/src/ble/meshtastic_handshake.c 2>/dev/null || true)
 AES_SRC=$(ls "$ROOT"/lib/tiny-AES-c/aes.c 2>/dev/null || true)
 
 status=0

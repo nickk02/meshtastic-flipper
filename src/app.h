@@ -13,6 +13,7 @@
 #include "src/proto/mesh_decode.h"
 #include "src/model/message_ring.h"
 #include "src/model/node_roster.h"
+#include "src/ble/meshtastic_profile.h"
 #include "src/radio/frame_source.h"
 
 typedef enum {
@@ -46,6 +47,10 @@ typedef struct {
 
     FuriThread* thread;
     volatile bool running;
+
+    /* NULL when Bluetooth could not start. The app carries on without phone
+     * support rather than refusing to run. */
+    MeshtasticBleService* ble;
 
     Gui* gui;
     ViewPort* view_port;
