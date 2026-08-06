@@ -20,12 +20,37 @@ to require any of these, stop and ask rather than expanding scope.
 
 Transmit is a stretch goal for M4 only. M0 through M3 are receive only.
 
-### Explicitly rejected alternative
+### Explicitly rejected alternative: ZeroMesh and the UART client architecture
 
-A UART client architecture, where the Flipper acts as a display for a separate
-Meshtastic node (the ZeroMesh approach), was considered and rejected. It is
-substantially less work, but it does not make the Flipper a Meshtastic
-receiver, which is the point of the project.
+Considered three times and rejected three times. Recorded in full so it is not
+raised a fourth.
+
+[ZeroMesh](https://lab.flipper.net/apps/zeromesh) is an existing, free FAP in the
+official catalog that already does the UART client architecture. It connects to
+a separate Meshtastic node over serial on header pins 13 and 14 plus ground, at
+115200 baud. The node performs all LoRa modulation, protocol handling and
+crypto. ZeroMesh renders what the node sends it.
+
+Two consequences that are easy to get backwards:
+
+- **ZeroMesh cannot be adapted to drive a LoRa board.** It contains no SX1262
+  driver and no protocol code. Attaching an SX1262 add-on to a Flipper running
+  ZeroMesh does nothing, because there is nothing in it for a radio to talk to.
+- **ZeroMesh is not a stepping stone to this project.** The two share
+  essentially no code. Its only value here is as a reference for FAP structure,
+  view dispatch and settings persistence, which is how the brief lists it.
+
+The rejection is not about effort. ZeroMesh is free and works today, and if the
+goal were "see mesh traffic on the Flipper screen" it would be the correct
+answer and this project would be unnecessary. It is rejected because it requires
+carrying the node as well, so the Flipper is a display rather than a receiver.
+Making the Flipper itself hear Meshtastic is the entire point, and that requires
+adding LoRa silicon.
+
+The Flipper cannot receive LoRa unaided under any circumstances. Its built in
+sub-GHz chip is a CC1101, which does FSK, GFSK, MSK, OOK and ASK. LoRa is a
+proprietary Semtech chirp spread spectrum modulation implemented in silicon, and
+the CC1101 has no demodulator for it. No firmware, app or antenna changes this.
 
 ## 2. Verified facts
 
