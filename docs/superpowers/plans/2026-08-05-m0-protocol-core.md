@@ -2019,8 +2019,13 @@ All of the following before M1 begins:
 - [ ] A synthesized encrypted frame decodes to byte-exact original text.
 - [ ] `docs/measurements.md` records the pinned ufbt SDK version, empty FAP
       size, and free heap measured on the device.
-- [ ] `src/proto/` contains no `#include <furi` anywhere. Verify:
-      `grep -rn "furi" src/proto/ && echo "VIOLATION" || echo "clean"`
+- [ ] `src/proto/` includes no Flipper headers. Verify:
+      `grep -rnE '^[[:space:]]*#[[:space:]]*include.*(furi|gui/|input/|storage/)' src/proto/ && echo "VIOLATION" || echo "clean"`
+
+      Match on the include line, not on the bare word. A plain
+      `grep -rn "furi" src/proto/` reports a false positive, because
+      `mesh_crypto.h` documents in a comment why `furi_hal_crypto` cannot be
+      used. Documenting the constraint is not violating it.
 - [ ] No `malloc` or `calloc` in `src/proto/`. Verify:
       `grep -rn "malloc\|calloc" src/proto/ && echo "VIOLATION" || echo "clean"`
 
