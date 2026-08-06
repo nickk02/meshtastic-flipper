@@ -27,6 +27,10 @@ fi
 CFLAGS="-std=c99 -Wall -Wextra -Werror -O1 -g"
 INCLUDES="-I. -I$ROOT/src/proto -I$ROOT/vendor/tiny-AES-c"
 
+# tiny-AES-c selects its modes through #ifndef guards, so configure it here and
+# leave the vendored sources byte-identical to upstream.
+AES_DEFINES="-DCBC=0 -DECB=0 -DCTR=1"
+
 PROTO_SRC=$(ls "$ROOT"/src/proto/*.c 2>/dev/null || true)
 AES_SRC=$(ls "$ROOT"/vendor/tiny-AES-c/aes.c 2>/dev/null || true)
 
@@ -34,7 +38,7 @@ status=0
 for src in test_*.c; do
     name="${src%.c}"
     # shellcheck disable=SC2086
-    gcc $CFLAGS $INCLUDES -o "$OUT/$name.exe" "$src" $PROTO_SRC $AES_SRC
+    gcc $CFLAGS $AES_DEFINES $INCLUDES -o "$OUT/$name.exe" "$src" $PROTO_SRC $AES_SRC
     echo "--- $name"
     if ! "./$OUT/$name.exe"; then
         status=1
