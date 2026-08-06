@@ -39,10 +39,9 @@ typedef struct {
     size_t scroll;
 
     FrameSource* source;
+    /* False when the SX1262 did not answer. The UI says so rather than
+     * showing an empty screen that looks like a quiet channel. */
     bool source_started;
-    /* True when the SX1262 answered. False means we fell back to simulation,
-     * which the UI states plainly rather than looking like a silent radio. */
-    bool source_is_radio;
     uint32_t crc_errors;
 
     FuriThread* thread;

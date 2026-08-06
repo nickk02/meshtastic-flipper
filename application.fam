@@ -10,6 +10,7 @@ App(
     fap_description="Meshtastic LoRa receiver. Requires an external SX1262 module.",
     fap_author="nickk02",
     fap_version="0.1",
+    fap_icon="images/icon_10x10.png",
     # Listed explicitly, because the default glob also pulls in test/host,
     # which is PC-only code that has no business in the firmware build.
     sources=[
