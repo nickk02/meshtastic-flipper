@@ -69,15 +69,20 @@ Planned:
 - Transmit text
 - Announce itself, so other nodes list it
 
-Not planned, and not possible in a Flipper app:
+Possible, but not scheduled:
 
-- Phone app connectivity
+- Phone app connectivity. The Meshtastic app's handshake turns out to need four
+  messages, not the forty the firmware sends, and the Flipper SDK does export
+  the BLE calls an app needs. This is a real option once the radio works.
+
+Not possible in a Flipper app:
+
 - Direct messages, position, telemetry, MQTT, routing for other nodes
 
-[docs/feasibility-full-node.md](docs/feasibility-full-node.md) explains the
-second list, with the memory arithmetic. In short: a Flipper app loads into
-RAM, it does not run from flash, and Meshtastic firmware is about eight times
-larger than the heap an app gets.
+[docs/feasibility-full-node.md](docs/feasibility-full-node.md) covers all three
+lists. In short: a full node needs `NodeDB` and `Router`, a Flipper app loads
+into RAM rather than running from flash, and Meshtastic firmware is about eight
+times larger than the heap an app gets.
 
 ## Layout
 

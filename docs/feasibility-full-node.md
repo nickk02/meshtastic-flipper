@@ -3,38 +3,63 @@
 Date: 2026-08-05. Memory figures updated 2026-08-06 with measured values.
 
 The project owner asked for "an app on my Flipper that makes it a Meshtastic
-node I can connect to my phone". The project brief puts the phone API, direct
-messages, position, telemetry and routing out of scope. This document explains
-which is achievable.
+node I can connect to my phone". This document works out which parts of that
+are achievable.
 
-The answer is no, not as a FAP. Bluetooth is not the blocker. Protocol
-complexity is not the blocker. A FAP runs from RAM, and Meshtastic is about
-eight times too large to fit there.
+It answers two separate questions, and I originally merged them into one. That
+was a mistake, corrected in section 1.
 
-Section 5 covers a path to a real Meshtastic node on Flipper hardware. That
-path stops being a Flipper.
+1. Can a FAP be a full Meshtastic node? No. Section 2 explains why.
+2. Can a FAP connect to the Meshtastic phone app? Probably yes. Section 4
+   explains what that needs. It is much less work than I first claimed.
 
-## 1. Where I was wrong
+## 1. Two corrections I owe
 
-I first claimed that a Flipper app can barely reach the Bluetooth stack. That
-is wrong. I am correcting it here.
+### Bluetooth is available to apps
 
-`furi_hal_bt.h:86` declares:
+I first said a Flipper app can barely reach the Bluetooth stack. That is wrong.
 
-```c
-FuriHalBleProfileBase* furi_hal_bt_start_app(
-    const FuriHalBleProfileTemplate* profile_template,
-    FuriHalBleProfileParams params,
-    ...);
+`furi_hal_bt.h:86` declares `furi_hal_bt_start_app`. It accepts a custom
+profile template, and `FuriHalBleProfileTemplate` is a fully defined struct
+with `start`, `stop` and `get_gap_config` hooks. `profile_interface.h` and
+`gatt.h` are both in the FAP-visible SDK.
+
+The firmware also publishes an API table listing every symbol an app may call.
+It marks 2,444 symbols as exported and 1,087 as blocked.
+`furi_hal_bt_start_app` is exported. So an app can create its own GATT service.
+This is confirmed, not inferred.
+
+### The phone handshake is four messages, not forty
+
+I then said the phone app needs about 40 messages before it will connect, and
+that this made phone support impractical. That is also wrong.
+
+The error was in my method. I read the firmware, saw it send 40 messages during
+the config handshake, and assumed the client required all of them. The firmware
+sends everything because it has everything. Reading one side and inferring the
+other proves nothing about the other.
+
+The Android client's own test suite settles it
+(`MeshConfigFlowManagerImplTest.kt`):
+
+```kotlin
+fun `Stage 1 complete without metadata still succeeds with null firmware version`() {
+    handleMyInfo(protoMyNodeInfo)
+    manager.handleConfigComplete(HandshakeConstants.CONFIG_NONCE)
+    verify { connectionManager.onRadioConfigLoaded() }
+}
 ```
 
-It accepts a custom profile template. An app can therefore create its own GATT
-service, with its own UUIDs and characteristics. The Meshtastic BLE service
-needs three: a `ToRadio` write characteristic, a `FromRadio` read
-characteristic, and a `FromNum` notify characteristic. An app can create all
-three.
+That is the whole of Stage 1. Two messages. No Config blocks, no ModuleConfig
+blocks, no Channels, no DeviceMetadata, no region presets, no file manifest.
 
-Bluetooth transport is not why this fails.
+`buildMyNodeInfo` in `MeshConfigFlowManagerImpl.kt:463` reads only four fields
+from MyNodeInfo: `my_node_num`, `min_app_version`, `device_id` and `pio_env`.
+Its `metadata` parameter is nullable throughout. It returns null only if an
+exception is thrown.
+
+Nothing in the client tracks which config blocks arrived. There is no
+"required config" set to satisfy.
 
 ## 2. The blocker: a FAP runs from RAM
 
@@ -98,28 +123,70 @@ The brief drew its scope line at the right place, and named the reason:
 `NodeDB.cpp` at 4,467 lines and `Router.cpp` at 1,566 lines separate "receive
 and display" from "be a node".
 
-## 4. What each capability needs
+## 4. What phone connectivity actually needs
 
-Set size aside for a moment. This is what each feature would still require.
+Revised after reading the Android client.
+
+### The BLE service
+
+ESP32 nodes expose one service with three characteristics.
+`src/BluetoothCommon.h:9-14`:
+
+| Characteristic | UUID | Role |
+| --- | --- | --- |
+| Service | `6ba1b218-15a8-461f-9fa8-5dcae273eafd` | What the app scans for |
+| ToRadio | `f75c76d2-129e-4dad-a1dd-7866124401e7` | The phone writes a ToRadio protobuf |
+| FromRadio | `2c55e69e-4993-11ed-b878-0242ac120002` | The phone reads one FromRadio message per read |
+| FromNum | `ed9da18c-a800-4f66-a670-aa7547e34453` | The device notifies. A doorbell, carrying no data |
+
+The flow is simple. The device notifies FromNum when data is waiting. The phone
+then reads FromRadio repeatedly until a read returns empty.
+
+`NimbleBluetooth.cpp` is 1,085 lines, but most of that handles synchronization
+between the NimBLE FreeRTOS task and the main task. The protocol itself is
+small.
+
+### The handshake
+
+Four messages:
+
+1. MyNodeInfo. The client reads `my_node_num`, `min_app_version`, `device_id`
+   and `pio_env`.
+2. `config_complete_id` carrying the config nonce. Stage 1 ends.
+3. Our own NodeInfo. An empty node set is valid.
+4. `config_complete_id` carrying the node-info nonce. Stage 2 ends and the
+   connection reports Complete.
+
+After that, received frames stream to the phone as MeshPacket inside FromRadio.
+
+### The remaining capabilities
 
 | Capability | Requires |
 | --- | --- |
-| Appear in other nodes' node lists | A periodic `NodeInfo` broadcast. Protobuf encoding. Small. |
-| Send text on the primary channel | A transmit path. Already planned for M4. |
-| Receive direct messages | X25519 key exchange and AES-CCM. The `CryptoEngine` PKI paths, plus key storage. |
-| Report position and telemetry | The module system, a GPS or a fixed position, and `NodeDB` entries. |
-| Relay traffic for others | `Router`, plus `PacketHistory` to suppress duplicates. Real airtime and battery cost. |
-| Connect to the phone app | `PhoneAPI` at 2,199 lines, the full config and admin protobuf set, `NodeDB` for the node list, and a custom BLE GATT service. |
+| Appear in other nodes' node lists | A periodic `NodeInfo` broadcast over the air. Small. |
+| Send text on the primary channel | A transmit path. Planned for M4. |
+| Phone app connects and shows messages | The BLE service above, four protobuf messages, and MeshPacket encoding. |
+| Receive direct messages | X25519 and AES-CCM. The PKI paths, plus key storage. |
+| Report position and telemetry | The module system, a position source, and NodeDB entries. |
+| Relay traffic for others | `Router` plus `PacketHistory`. Real airtime and battery cost. |
 
-The phone connection is the most demanding item, not the least. The phone app
-does not only read messages. It reads and writes the node's whole
-configuration and node database.
+The first three are achievable. The last three are not, and they are what make
+a *full node* impossible.
 
-The handshake is also all or nothing. On connect the app sends a
-`want_config_id`. It then expects a full sequence in reply: MyNodeInfo, the
-node's own NodeInfo, every Config block, every ModuleConfig block, all
-Channels, and a completion marker. A partial implementation does not half
-work. The app fails to connect.
+### Why this is still not scheduled
+
+Not because it cannot work. Because of sequencing.
+
+The radio has never received a packet. The SX1262 driver has never run. Adding
+a second unproven system on top of an unproven first one is how a project
+stalls with two broken halves and no way to tell which is at fault.
+
+It also depends on the phone app's behaviour, which we do not control. A client
+update can change what the handshake accepts.
+
+M4 already delivers the visible outcome, by a different route: transmit plus a
+NodeInfo broadcast makes the Flipper appear in the phone's node list, through
+the node the phone is already paired with.
 
 ## 5. The one real path to a full node on Flipper hardware
 
@@ -154,13 +221,34 @@ This is not an argument against building it. It is an argument that the reason
 to build it must be "I want the Flipper to do this". If the reason is "I need a
 Meshtastic node", the answer is already on the desk.
 
-## 7. Recommendation
+## 7. Ready-made hardware, if none of this appeals
 
-Build the receiver the spec describes. It is achievable. It is useful. It makes
-the Flipper do something it cannot do today.
+If the goal is simply a Meshtastic node that works with a Flipper, that product
+exists. [Nibble Zero](https://retia.io/products/nibble-zero-kit) is 75 USD. It
+is a real Meshtastic node with Flipper Zero support, built around a Seeed
+WIO-SX1262 radio programmable for 868MHz or 915MHz. It runs Meshtastic firmware
+itself, has Wi-Fi and Bluetooth, and works standalone. A Flipper is not
+required. The kit includes a case, a BMP280 sensor and an antenna.
 
-If M3 lands and the size numbers allow, add transmit and a `NodeInfo`
-broadcast. Other nodes would then list the Flipper as a minimal participant.
-That is the realistic ceiling for a FAP, and it is worth aiming at.
+It also swaps between Meshtastic and MeshCore by reflashing.
 
-Phone connectivity is not on that ladder. No amount of scoping puts it there.
+That is the honest last-resort answer. It costs more than the Electronic Cats
+add-on and it does not make the Flipper itself a receiver, but it needs no
+software work and it pairs with the phone app today.
+
+## 8. Recommendation
+
+Build the receiver the spec describes. It is achievable, it is useful, and it
+makes the Flipper do something it cannot do today.
+
+Then add transmit and a `NodeInfo` broadcast. Other nodes will list the Flipper
+as a minimal participant, and it will appear in the phone's node list through
+the node the phone is already paired with.
+
+Phone connectivity is a real option after that, not before it. The order
+matters: prove the radio receives, then prove it transmits, then consider a
+second protocol surface. Doing it the other way around leaves two unproven
+systems and no way to isolate a fault between them.
+
+A full node remains out of reach. Direct messages, position, telemetry and
+routing need `NodeDB`, `Router` and the module system, and those do not fit.
