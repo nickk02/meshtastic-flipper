@@ -512,16 +512,46 @@ where silent wrongness is most likely and hardest to diagnose.
 
 Carried forward into the implementation plan. None block starting M0.
 
-1. LongFast bandwidth, spreading factor and coding rate. Not found in the files
-   read. `RadioInterface.h:90-92` carries only the 125/9/5 defaults. Derive from
-   the `PRESET` macro and `applyModemConfig`, then cross check against the
-   reference node's CLI. Do not assume values.
-2. The frequency slot calculation. `RadioInterface::getFreq` only returns
-   `savedFreq`. The real computation is around `RadioInterface.cpp:1302-1340`.
-3. Antenna connector and 915 RF matching on the board (see section 3).
-4. Whether the Meshtastic `zephyr/` port matures enough to change the calculus.
-   Check before committing significant time past M3. As of this writing it is
-   one `prj.conf` and a single nRF54L15 board overlay.
+1. Antenna connector and 915 RF matching on the board. **Resolved**, see
+   section 3: two U.FL connectors, no antenna included, Johanson 915MHz balun.
+2. Per pin and per rail GPIO current limits, needed before M4 transmit. Still
+   open. `docs.flipper.net` returns 403 to automated fetches, so read them by
+   hand. Not needed for receive.
+3. Whether the Meshtastic `zephyr/` port matures enough to change the calculus.
+   Check before committing significant time past M3.
+
+### Resolved since this document was written
+
+**LongFast parameters**, previously open question 1. SF11, bandwidth 250kHz,
+coding rate 4/5, from `MeshRadio.h:282-287` with the named defaults at
+`MeshRadio.h:99`, `:104` and `:106`. Implemented and tested in
+`src/radio/lora_config.c`.
+
+**Frequency slot calculation**, previously open question 2. From
+`RadioInterface.cpp:1307-1348`:
+
+```
+slotWidth   = spacing + padding * 2 + bw / 1000
+numSlots    = round((freqEnd - freqStart + spacing) / slotWidth)
+slot        = djb2(channelName) % numSlots
+frequency   = freqStart + bw / 2000 + padding + slot * slotWidth
+```
+
+For US LongFast that gives 104 slots, slot 19, and **906.875 MHz**, which is
+channel 20 in the 1-based numbering nodes display. That independently
+reproduces the frequency the Meshtastic community documents, which is what
+makes it trustworthy rather than merely derived.
+
+Note that this uses djb2 (`RadioInterface.cpp:943`), a different function from
+the XOR fold used for the channel hash. Confusing the two puts the radio on the
+wrong frequency.
+
+**Low data rate optimization.** Not previously identified as a risk, and it
+should have been. The reference driver comments that LDRO is required for SF11
+and SF12, which holds only at narrow bandwidths. RadioLib, and therefore
+Meshtastic, enables it when symbol duration reaches 16ms. US LongFast is SF11
+at 250kHz, so 8.192ms, so LDRO stays **off**. Tested in
+`test/host/test_lora_config.c`.
 
 ### Resolved by this document
 

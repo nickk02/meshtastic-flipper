@@ -5,14 +5,22 @@ SX1262 module and shows text messages and heard nodes on the screen.
 
 ## Status
 
-Early. There is no working code yet.
+The app is built and runs. It cannot receive yet, because the radio hardware
+has not arrived.
 
-The design and the first implementation plan are written and the protocol facts
-have been verified against the Meshtastic source. The radio hardware has not
-been ordered. Work is currently on M0, which builds and tests the decode path
-on a PC without any radio attached.
+Everything that can be verified without an SX1262 has been: the protocol decode
+path, the channel keys and crypto, the models, and the LoRa parameters, across
+323 host tests plus an on-device self test. Installing it today gives you a
+working receiver driven by a simulated frame source, which exercises the same
+decode and display path a radio will.
 
-Do not install this expecting it to do anything.
+The one unverified piece is the SX1262 driver itself. It is written from the
+datasheet and from a working reference for this exact board, but it has never
+run against hardware. Treat it as a hypothesis.
+
+When no radio answers, the app falls back to simulation and labels the source
+"(sim)" on the Stats page, so it is never ambiguous whether what you are seeing
+is real.
 
 ## Why this needs extra hardware
 
