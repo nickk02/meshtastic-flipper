@@ -1,0 +1,19 @@
+# Local scratch, probes, generated one-off scripts, vendored reference checkouts
+.local-scratch/
+
+# ufbt build output
+.ufbt/
+dist/
+build/
+*.fap
+
+# Host test build output
+test/host/build/
+*.o
+*.exe
+
+# Editor and OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
