@@ -49,37 +49,38 @@ can register its own GATT service.
 
 Transmit is a stretch goal for M4 only. M0 through M3 are receive only.
 
-### Explicitly rejected alternative: ZeroMesh and the UART client architecture
+### Rejected alternative: ZeroMesh and the UART client architecture
 
-Considered three times and rejected three times. Recorded in full so it is not
-raised a fourth.
+Considered three times. Rejected three times. Recorded here in full so it is
+not raised a fourth.
 
-[ZeroMesh](https://lab.flipper.net/apps/zeromesh) is an existing, free FAP in the
-official catalog that already does the UART client architecture. It connects to
-a separate Meshtastic node over serial on header pins 13 and 14 plus ground, at
-115200 baud. The node performs all LoRa modulation, protocol handling and
-crypto. ZeroMesh renders what the node sends it.
+[ZeroMesh](https://lab.flipper.net/apps/zeromesh) is a free FAP in the official
+catalog. It already implements the UART client architecture. It connects to a
+separate Meshtastic node over serial, on header pins 13 and 14 plus ground, at
+115200 baud. The node does all the LoRa modulation, the protocol handling and
+the crypto. ZeroMesh draws what the node sends it.
 
-Two consequences that are easy to get backwards:
+Two points are easy to get backwards:
 
-- **ZeroMesh cannot be adapted to drive a LoRa board.** It contains no SX1262
-  driver and no protocol code. Attaching an SX1262 add-on to a Flipper running
-  ZeroMesh does nothing, because there is nothing in it for a radio to talk to.
-- **ZeroMesh is not a stepping stone to this project.** The two share
-  essentially no code. Its only value here is as a reference for FAP structure,
-  view dispatch and settings persistence, which is how the brief lists it.
+1. ZeroMesh cannot drive a LoRa board. It contains no SX1262 driver and no
+   protocol code. Attach an SX1262 add-on to a Flipper running ZeroMesh and
+   nothing happens. There is nothing in it for a radio to talk to.
+2. ZeroMesh is not a stepping stone to this project. The two share almost no
+   code. Its only value here is as a reference for FAP structure, view dispatch
+   and settings persistence, which is how the brief lists it.
 
-The rejection is not about effort. ZeroMesh is free and works today, and if the
-goal were "see mesh traffic on the Flipper screen" it would be the correct
-answer and this project would be unnecessary. It is rejected because it requires
-carrying the node as well, so the Flipper is a display rather than a receiver.
-Making the Flipper itself hear Meshtastic is the entire point, and that requires
-adding LoRa silicon.
+Effort is not the reason for the rejection. ZeroMesh is free and it works
+today. If the goal were to see mesh traffic on the Flipper screen, ZeroMesh
+would be the right answer and this project would be unnecessary.
 
-The Flipper cannot receive LoRa unaided under any circumstances. Its built in
-sub-GHz chip is a CC1101, which does FSK, GFSK, MSK, OOK and ASK. LoRa is a
-proprietary Semtech chirp spread spectrum modulation implemented in silicon, and
-the CC1101 has no demodulator for it. No firmware, app or antenna changes this.
+The reason is that ZeroMesh needs the node as well. The Flipper becomes a
+display for a device you already carry. This project exists to make the Flipper
+itself hear Meshtastic, and that needs LoRa silicon.
+
+A stock Flipper cannot receive LoRa under any circumstances. Its sub-GHz chip
+is a CC1101. The CC1101 demodulates FSK, GFSK, MSK, OOK and ASK. LoRa is
+Semtech's chirp spread spectrum modulation, implemented in silicon, and the
+CC1101 has no demodulator for it. No firmware, app or antenna changes that.
 
 ## 2. Verified facts
 
@@ -313,32 +314,47 @@ vertical (BOM items 13 and 14). The board seats on the Flipper GPIO header.
 
 ## 4. Architecture
 
-The organizing constraint: **`src/proto/` must not include a single Flipper
-header.** It compiles under plain gcc on a PC, takes byte buffers in and plain
-structs out, and allocates nothing. That boundary is what makes M0 possible and
-what makes the highest risk code testable before any radio exists.
+One rule organizes the whole design: `src/proto/` must not include a Flipper
+header. It compiles under plain gcc on a PC. It takes byte buffers in. It
+returns plain structs. It allocates nothing.
+
+That boundary makes M0 possible. It lets the highest risk code be tested before
+any radio exists. CI enforces it.
 
 ```
 meshtastic-flipper/
   application.fam
-  meshtastic_flipper.c        entry, view dispatcher, scene manager
+  meshtastic_flipper.c        entry point
   src/
-    proto/                    ZERO Flipper deps, host compilable
-      aes128.c/.h             encrypt only AES128 core
-      mesh_crypto.c/.h        nonce construction plus CTR wrapper
-      mesh_header.c/.h        16 byte PacketHeader plus flag decode
-      mesh_data.c/.h          Data field walker: portnum, payload
+    app.c/.h                  state, radio thread, main loop
+    proto/                    No Flipper headers. Compiles on a PC.
       mesh_channel.c/.h       defaultpsk expansion, channel hash
-    radio/                    Flipper HAL only, zero Meshtastic knowledge
-      sx126x_regs.h           every constant with a datasheet citation
-      sx126x.c/.h             opcodes, register access, BUSY handshake
-      lora_config.c/.h        LongFast US params, frequency slot math
-      radio_thread.c/.h       FuriThread: config, RX loop, decode, queue
-    ui/                       views only, no protocol logic
+      mesh_crypto.c/.h        nonce construction, AES-CTR wrapper
+      mesh_header.c/.h        16 byte PacketHeader, flag decode
+      mesh_data.c/.h          Data field walker: portnum, payload
+      mesh_decode.c/.h        frame to result, failure reasons
+      mesh_encode.c/.h        transmit frame construction
+    model/                    No Flipper headers. Compiles on a PC.
+      mesh_event.c/.h         one received frame, reduced for the UI
+      message_ring.c/.h       fixed ring of received messages
+      node_roster.c/.h        fixed table of heard nodes
+    radio/                    Flipper HAL. No Meshtastic knowledge.
+      lora_config.c/.h        US LongFast parameters, frequency slot math
+      sx126x_regs.h           opcodes, each with a datasheet citation
+      sx126x.c/.h             driver: commands, registers, BUSY handshake
+      frame_source.h          the interface a frame producer implements
+      source_radio.c/.h       FrameSource backed by the SX1262
+      source_sim.c/.h         FrameSource that replays known frames
+    ui/
+      app_view.c/.h           drawing only, no protocol logic
+  lib/                        Third party sources. Licenses retained.
   test/host/                  gcc, runs on a PC
-  test/tools/gen_vectors.py   ground truth generator
-  vendor/                     third party sources, licenses retained
+  test/tools/gen_vectors.py   generates test vectors and sim frames
 ```
+
+`lora_config.c` sits in `src/radio/` but uses no Flipper HAL, so the host build
+compiles it too. The frequency and modem parameters are therefore tested, even
+though the driver around them is not.
 
 ### Dependency rules
 
@@ -352,7 +368,7 @@ meshtastic-flipper/
 ### Radio layer provenance
 
 The radio layer is derived from `ElectronicCats/flipper-SX1262-LoRa` (MIT,
-Copyright 2024 ElectronicCats). The MIT notice is retained in `vendor/`. The
+Copyright 2024 ElectronicCats). The MIT notice is retained in `lib/`. The
 driver is stripped to the receive path, then retuned to Meshtastic parameters.
 
 This satisfies the brief's rule that no register address, opcode or timing
@@ -405,20 +421,19 @@ Under 5KB of state, leaving the FAP budget to code.
 
 ## 7. Error handling and observability
 
-There is no logic analyzer available. Built in observability substitutes for it.
+No logic analyzer is available. Built-in observability replaces it.
 
-Every dropped frame is counted and attributed, never silently discarded.
-Distinct reasons:
+The app counts every dropped frame and records why. It never discards one
+silently. The reasons are:
 
-- CRC failure
-- Implausible header (nonsensical `to`/`from`, hop limit out of range)
-- Channel hash mismatch
-- Decrypt produced non-protobuf output
-- Portnum is not a text message
+1. CRC failure.
+2. Implausible header: nonsensical `to` or `from`, or a hop limit out of range.
+3. Channel hash mismatch.
+4. Decryption produced something that is not protobuf.
+5. The portnum is not a text message.
 
-A counters view shows the tally per reason. When M2 or M3 misbehaves, that
-histogram localizes the fault to a layer, which is most of what the instrument
-would have provided.
+A counters view shows the tally for each reason. When M2 or M3 misbehaves, that
+tally points at one layer. A logic analyzer would tell you much the same thing.
 
 ## 8. Milestones
 
@@ -501,12 +516,15 @@ others, phone connectivity) is ruled out on size. See
 
 ## 9. Testing strategy
 
-Real automated tests exist only for `proto`, run on a PC via gcc. The radio
-layer is verified manually on hardware, because there is nothing meaningful to
-mock about an SX1262.
+Automated tests cover `proto`, `model`, and the LoRa parameters. They run on a
+PC under gcc.
 
-The asymmetry is deliberate. The layer that can be tested properly is the layer
-where silent wrongness is most likely and hardest to diagnose.
+The driver is verified by hand, on hardware. There is nothing useful to mock
+about an SX1262: a mock would only confirm that the driver sends the bytes the
+mock expects, which is the same assumption twice.
+
+The split is deliberate. The layers that can be tested properly are the layers
+where a silent error is most likely and hardest to find.
 
 ## 10. Open items
 
