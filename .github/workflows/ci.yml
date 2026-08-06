@@ -49,15 +49,7 @@ jobs:
             echo "Regenerate with: python test/tools/gen_vectors.py > test/host/vectors.h"
             exit 1
           fi
-          python test/tools/gen_vectors.py --sim-frames /tmp/sim_frames.h
-          if ! diff -u src/radio/sim_frames.h /tmp/sim_frames.h; then
-            echo
-            echo "src/radio/sim_frames.h does not match gen_vectors.py output."
-            echo "Regenerate with:"
-            echo "  python test/tools/gen_vectors.py --sim-frames src/radio/sim_frames.h"
-            exit 1
-          fi
-          echo "Committed vectors and sim frames both match the generator."
+          echo "Committed vectors match the generator."
 
   proto-isolation:
     name: Protocol layer has no Flipper dependencies
@@ -85,8 +77,22 @@ jobs:
           echo "clean"
 
   build-fap:
-    name: Build FAP
+    name: "Build FAP (${{ matrix.target }})"
     runs-on: ubuntu-latest
+    strategy:
+      # One firmware failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - target: ofw
+            api: "87.1"
+            index: https://update.flipperzero.one/firmware/directory.json
+          - target: unleashed
+            api: "88.2"
+            index: https://up.unleashedflip.com/directory.json
+          - target: momentum
+            api: "87.1"
+            index: https://up.momentum-fw.dev/firmware/directory.json
     steps:
       - uses: actions/checkout@v7
 
@@ -94,18 +100,50 @@ jobs:
         id: build
         uses: flipperdevices/flipperzero-ufbt-action@v0.1
         with:
+          sdk-index-url: ${{ matrix.index }}
           sdk-channel: release
 
-      - name: Report size
+      # Each target follows its firmware's release channel, which floats. When a
+      # firmware bumps its API the build follows silently, and users on that
+      # firmware are then told our app is out of date. This surfaces the bump as
+      # a log line instead.
+      #
+      # Advisory on purpose. The SDKs are not pinned, so a hard gate would turn
+      # CI red on somebody else's release schedule. A warning here means "update
+      # matrix.api and the README table", which is a deliberate edit.
+      - name: API drift check (advisory)
+        continue-on-error: true
+        env:
+          EXPECTED_API: ${{ matrix.api }}
+          ACTUAL_API: ${{ steps.build.outputs.api-version }}
         run: |
-          for f in ${{ steps.build.outputs.fap-artifacts }}; do
-            echo "$f: $(stat -c%s "$f") bytes"
-          done
+          if [ -z "$ACTUAL_API" ]; then
+            echo "::warning title=API unknown::ufbt reported no API version for ${{ matrix.target }}"
+            exit 0
+          fi
+          if [ "$ACTUAL_API" != "$EXPECTED_API" ]; then
+            echo "::warning title=API drift::${{ matrix.target }} now reports API $ACTUAL_API, but the matrix records $EXPECTED_API. Update matrix.api and the firmware table in README.md."
+          else
+            echo "${{ matrix.target }} API $ACTUAL_API matches the matrix."
+          fi
+
+      # Renamed per target. Three identically named meshtastic.fap files would
+      # be indistinguishable once downloaded, which is how somebody installs the
+      # wrong one and reports a mismatch that is not a bug.
+      - name: Name the artifact per firmware
+        id: rename
+        run: |
+          mkdir -p out
+          cp dist/meshtastic.fap "out/meshtastic-${{ matrix.target }}.fap"
+          echo "size=$(stat -c%s out/meshtastic-${{ matrix.target }}.fap)" >> "$GITHUB_OUTPUT"
+
+      - name: Report size
+        run: echo "meshtastic-${{ matrix.target }}.fap is ${{ steps.rename.outputs.size }} bytes, API ${{ steps.build.outputs.api-version }}"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: meshtastic-fap-api${{ steps.build.outputs.api-version }}
-          path: ${{ steps.build.outputs.fap-artifacts }}
+          name: meshtastic-${{ matrix.target }}
+          path: out/meshtastic-${{ matrix.target }}.fap
           if-no-files-found: error
 
   lint-fap:
@@ -114,6 +152,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Once, against official. clang-format rules do not vary by firmware, so
+      # running this three times would only spend runner minutes.
       - name: ufbt lint
         uses: flipperdevices/flipperzero-ufbt-action@v0.1
         with:

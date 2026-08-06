@@ -47,8 +47,14 @@ static void draw_messages(Canvas* canvas, MeshApp* app) {
     size_t count = message_ring_count(&app->messages);
 
     if(count == 0) {
-        canvas_draw_str(canvas, 2, BODY_TOP, "Nothing received yet");
-        canvas_draw_str(canvas, 2, BODY_TOP + ROW_HEIGHT, app->source->name);
+        /* An empty list looks the same whether the channel is quiet or the
+         * radio never started. Say which. */
+        if(!app->source_started) {
+            canvas_draw_str(canvas, 2, BODY_TOP, "No SX1262 detected");
+            canvas_draw_str(canvas, 2, BODY_TOP + ROW_HEIGHT, "Check the add-on board");
+        } else {
+            canvas_draw_str(canvas, 2, BODY_TOP, "Listening, nothing yet");
+        }
         return;
     }
 
@@ -111,8 +117,7 @@ static void draw_nodes(Canvas* canvas, MeshApp* app) {
 static void draw_stats(Canvas* canvas, MeshApp* app) {
     char line[44];
 
-    snprintf(
-        line, sizeof(line), "Src: %s%s", app->source->name, app->source_is_radio ? "" : " (sim)");
+    snprintf(line, sizeof(line), "Radio: %s", app->source_started ? "SX1262" : "not found");
     canvas_draw_str(canvas, 2, BODY_TOP, line);
 
     snprintf(

@@ -7,7 +7,6 @@
 #include "src/model/mesh_event.h"
 #include "src/ble/meshtastic_profile.h"
 #include "src/radio/source_radio.h"
-#include "src/radio/source_sim.h"
 #include "src/ui/app_view.h"
 
 /* The primary channel. Meshtastic's default channel has an empty name and the
@@ -15,10 +14,6 @@
  * the hash real nodes put in the header. Confirmed against Channels::getHash. */
 #define PRIMARY_CHANNEL_NAME "LongFast"
 #define PRIMARY_PSK_INDEX    1
-
-/* How long the sim waits between frames. Slow enough to watch, fast enough
- * that the roster and counters fill while you are looking at them. */
-#define SIM_INTERVAL_MS 1500
 
 static void input_callback(InputEvent* event, void* context) {
     FuriMessageQueue* queue = context;
@@ -55,7 +50,7 @@ static int32_t radio_thread(void* context) {
         message_ring_push(&app->messages, &event);
         node_roster_observe(&app->roster, &event, furi_get_tick());
 
-        if(app->source_is_radio) app->crc_errors = source_radio_crc_errors(app->source);
+        app->crc_errors = source_radio_crc_errors(app->source);
 
         size_t copy = raw.len < RAW_FRAME_MAX ? raw.len : RAW_FRAME_MAX;
         memcpy(app->last_raw, raw.data, copy);
@@ -80,10 +75,8 @@ MeshApp* mesh_app_alloc(void) {
     app->page = PageMessages;
     app->scroll = 0;
 
-    /* Prefer the radio. mesh_app_run falls back to simulation if it does not
-     * answer, so the app is useful with or without the board attached. */
+    /* The SX1262 is the only frame source. */
     app->source = source_radio_alloc();
-    app->source_is_radio = true;
 
     /* Node identity. Derived from the Flipper's own BLE MAC so two Flippers
      * running this do not claim the same node number. The top bit is cleared
@@ -109,11 +102,7 @@ MeshApp* mesh_app_alloc(void) {
 
 static void free_source(MeshApp* app) {
     if(app->source == NULL) return;
-    if(app->source_is_radio) {
-        source_radio_free(app->source);
-    } else {
-        source_sim_free(app->source);
-    }
+    source_radio_free(app->source);
     app->source = NULL;
 }
 
@@ -146,15 +135,12 @@ void mesh_app_run(MeshApp* app) {
 
     app->running = true;
 
+    /* No fallback. If the radio does not answer, the UI says so. Showing
+     * invented traffic instead would make a broken radio look like a
+     * working one. */
     app->source_started = app->source->start(app->source);
-    if(!app->source_started && app->source_is_radio) {
-        /* No radio answered. Rather than presenting an empty screen that looks
-         * identical to a misconfigured radio, drop to simulation and say so. */
-        FURI_LOG_W("MeshApp", "no SX1262 detected, falling back to simulation");
-        free_source(app);
-        app->source = source_sim_alloc(SIM_INTERVAL_MS);
-        app->source_is_radio = false;
-        app->source_started = app->source->start(app->source);
+    if(!app->source_started) {
+        FURI_LOG_W("MeshApp", "no SX1262 detected");
     }
 
     app->thread = furi_thread_alloc_ex("MeshRadio", 2048, radio_thread, app);
