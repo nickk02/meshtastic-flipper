@@ -25,13 +25,13 @@ if ! command -v gcc >/dev/null 2>&1; then
 fi
 
 CFLAGS="-std=c99 -Wall -Wextra -Werror -O1 -g"
-INCLUDES="-I. -I$ROOT/src/proto -I$ROOT/lib/tiny-AES-c"
+INCLUDES="-I. -I$ROOT/src/proto -I$ROOT/src/model -I$ROOT/lib/tiny-AES-c"
 
 # tiny-AES-c selects its modes through #ifndef guards, so configure it here and
 # leave the vendored sources byte-identical to upstream.
 AES_DEFINES="-DCBC=0 -DECB=0 -DCTR=1"
 
-PROTO_SRC=$(ls "$ROOT"/src/proto/*.c 2>/dev/null || true)
+PROTO_SRC=$(ls "$ROOT"/src/proto/*.c "$ROOT"/src/model/*.c 2>/dev/null || true)
 AES_SRC=$(ls "$ROOT"/lib/tiny-AES-c/aes.c 2>/dev/null || true)
 
 status=0
