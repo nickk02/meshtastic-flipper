@@ -1,106 +1,99 @@
 # meshtastic-flipper
 
-A Flipper Zero app. It receives Meshtastic LoRa traffic through an external
-SX1262 module. It shows text messages and heard nodes on the screen.
+A Flipper Zero app that receives Meshtastic LoRa traffic. It needs an external
+SX1262 module. It shows text messages and heard nodes on the Flipper screen.
 
 ## Status
 
-The app builds and runs. It cannot receive yet. The radio hardware has not
+The app builds and runs. It does not receive yet. The radio hardware has not
 arrived.
 
-I verified everything that does not need an SX1262: the decode path, the
-channel keys and crypto, the models, and the LoRa parameters. That is 369 host
-tests plus a self test that runs on the device.
+Current release: v0.3.0-radio, 19,576 bytes.
 
-Install it today and you get a working receiver. A simulated frame source
-drives it. The simulation uses the same decode and display path that a radio
-will use.
+Verified without hardware, across 369 host tests and a self test on the device:
 
-One piece is unverified: the SX1262 driver. I wrote it from the datasheet and
-from a working reference for this exact board. It has never run against
-hardware. Treat it as a hypothesis.
+- The decode path: header, channel keys, AES128-CTR, protobuf
+- The transmit encoder, checked byte for byte against the `meshtastic` Python
+  package
+- The message ring and node roster
+- The US LongFast frequency and modem parameters
 
-If no radio answers, the app switches to simulation. The Stats page then labels
-the source "(sim)". You can always tell whether the frames are real.
+Not verified: the SX1262 driver. It was written from the datasheet and from a
+working reference for the same board. It has not run against hardware.
 
-## Why this needs extra hardware
+The app selects a frame source at startup. If no radio answers, it uses a
+simulated source and the Stats page shows "(sim)".
 
-The Flipper's built-in sub-GHz radio is a CC1101. It can tune to 915MHz. It can
-demodulate OOK, FSK, GFSK and MSK.
+## Why an external module is required
 
-LoRa is a different modulation. Semtech calls it chirp spread spectrum, and
-decoding it needs a dedicated demodulator in silicon. The CC1101 does not have
-one. That is why every Meshtastic device contains an SX1262 or an SX1276.
+The Flipper's sub-GHz radio is a CC1101. It tunes to 915MHz. It demodulates
+OOK, FSK, GFSK and MSK.
 
-A stock Flipper can detect that something transmits at 915MHz. It cannot read
-it. An SX1262 fixes that.
+LoRa uses chirp spread spectrum. Demodulating it requires dedicated silicon.
+The CC1101 has none, so a stock Flipper cannot decode LoRa at any frequency.
+Meshtastic devices all contain an SX1262 or an SX1276 for this reason.
 
 ## Hardware
 
-You need three things:
+Required:
 
 1. A Flipper Zero.
 2. An [Electronic Cats Flipper Add-on Sub-GHz](https://electroniccats.com/store/flipper-lra-subghz/).
-   It carries an SX1262. It seats on the GPIO header. No soldering.
-3. A 915MHz antenna with a U.FL lead, or a U.FL to SMA pigtail and an SMA
-   antenna. The board ships without one. Its PCB antenna footprints are marked
-   do-not-populate.
+   It carries an SX1262 and seats on the GPIO header. No soldering.
+3. A 915MHz antenna with a U.FL lead, or a U.FL to SMA pigtail with an SMA
+   antenna. The board ships without an antenna. Its PCB antenna footprints are
+   marked do-not-populate.
 
-A second Meshtastic node is also needed, to transmit against during testing.
+Testing also requires a second Meshtastic node to transmit against.
 
-The board fixes the pin assignments. The spec lists them. Two are easy to get
-wrong:
+The board fixes the pin assignments. `docs/superpowers/specs/` lists them all.
+Two differ from the common examples:
 
-- BUSY is on PB7, header pin 14. It is not on PB2, which the usual SX1262
-  wiring examples suggest.
-- The SX1262 chip select is PC0, header pin 16. Header pin 4 selects the
-  board's second CC1101, despite being named NSS0.
+- BUSY is PB7, header pin 14. It is not PB2.
+- The SX1262 chip select is PC0, header pin 16. Header pin 4 is named NSS0 but
+  selects the board's second CC1101.
 
 ## Scope
 
-This reimplements part of the Meshtastic protocol. It is not a port of the
+This implements part of the Meshtastic protocol. It is not a port of the
 firmware.
 
-Planned:
+Implemented or planned:
 
-- Receive and decrypt packets on the primary channel
+- Receive and decrypt on the primary channel
 - Display text messages
 - Track heard nodes with RSSI and SNR, in memory only
 - Transmit text
-- Announce itself, so other nodes list it
+- Broadcast NodeInfo, so other nodes list this device
 
-Possible, but not scheduled:
+Possible, not scheduled:
 
-- Phone app connectivity. The Meshtastic app's handshake turns out to need four
-  messages, not the forty the firmware sends, and the Flipper SDK does export
-  the BLE calls an app needs. This is a real option once the radio works.
+- Meshtastic phone app connectivity. The app's handshake needs four messages,
+  not the forty the firmware sends. The Flipper SDK exports the BLE and GATT
+  calls required.
 
-Not possible in a Flipper app:
+Out of reach in a Flipper app:
 
-- Direct messages, position, telemetry, MQTT, routing for other nodes
+- Direct messages, position, telemetry, MQTT, relaying for other nodes
 
-[docs/feasibility-full-node.md](docs/feasibility-full-node.md) covers all three
-lists. In short: a full node needs `NodeDB` and `Router`, a Flipper app loads
-into RAM rather than running from flash, and Meshtastic firmware is about eight
-times larger than the heap an app gets.
+[docs/feasibility-full-node.md](docs/feasibility-full-node.md) covers all
+three lists and the memory arithmetic behind the third.
 
 ## Layout
 
 ```
-src/proto/     Protocol encode and decode. No Flipper headers. Compiles on a PC.
-src/model/     Message ring and node roster. No Flipper headers.
+src/proto/     Encode and decode. No Flipper headers. Builds on a PC.
+src/model/     Message ring, node roster. No Flipper headers.
 src/radio/     SX1262 driver, LoRa parameters, frame sources.
-src/ui/        Views. Drawing only.
-test/host/     Tests that run on a PC.
+src/ui/        Drawing.
+test/host/     PC tests.
 test/tools/    Test vector generator.
-lib/           Third party code. Licenses retained.
-docs/          Spec, plans, measurements.
+lib/           Third party code.
+docs/          Feasibility analysis, measurements, spec and plans.
 ```
 
-One rule makes this testable: `src/proto/` must not include a Flipper header.
-It takes byte buffers in. It returns plain structs. It allocates nothing. It
-knows nothing about SPI or threads. That is why the crypto and the decode path
-were proven on a PC before any radio existed. CI enforces the rule.
+`src/proto/` must not include a Flipper header, and must not allocate. CI
+enforces both. This is what allows the decode path to be tested on a PC.
 
 ## Installing
 
@@ -108,60 +101,56 @@ Download `meshtastic.fap` from the
 [latest release](https://github.com/nickk02/meshtastic-flipper/releases). Copy
 it to `apps/Tools/` on the SD card. It appears under Apps, Tools, Meshtastic.
 
-Releases build against official firmware on the release channel. Custom
-firmware such as Momentum, Unleashed or RogueMaster may reject the app with an
-API mismatch. Rebuild against that SDK if it does.
+Releases build against official firmware, release channel, API 87.1. Custom
+firmware such as Momentum, Unleashed or RogueMaster may report an API mismatch.
+Rebuild against that SDK if it does.
 
 ## Building
-
-The app builds with [ufbt](https://github.com/flipperdevices/flipperzero-ufbt):
 
 ```
 ufbt
 ufbt launch
 ```
 
-The artifact lands at `dist/meshtastic.fap`.
+Output: `dist/meshtastic.fap`.
 
-The PC tests need gcc. They do not need a Flipper:
+PC tests need gcc. They do not need a Flipper:
 
 ```
 bash test/host/run_tests.sh
 ```
 
-To regenerate the test vectors you also need Python, with `cryptography` and
-`meshtastic` installed. The generated headers are committed, so you only need
-this when the vectors change.
+Regenerating the test vectors needs Python with `cryptography` and
+`meshtastic`. The generated headers are committed, so this is only required
+when the vectors change.
 
 ## CI
 
-Every push and pull request runs five checks:
+Each push and pull request runs five checks:
 
 1. The host test suite.
-2. A regeneration of the test vectors and the simulated frames, compared
-   against the committed copies. The generated files cannot drift from their
-   generator.
-3. A guard that `src/proto/` includes no Flipper headers and calls no
+2. Regeneration of the test vectors and simulated frames, compared against the
+   committed copies.
+3. A check that `src/proto/` includes no Flipper headers and calls no
    allocator.
 4. A FAP build, with the artifact attached to the run.
-5. A lint pass against the SDK's clang-format rules.
+5. clang-format, using the SDK's rules.
 
-A `v*` tag builds and publishes a release. The host suite must pass on that
-commit first.
+A `v*` tag publishes a release after the host suite passes on that commit.
 
 ## Third party code
 
-- [tiny-AES-c](https://github.com/kokke/tiny-AES-c), public domain. AES128 in
-  CTR mode. The Flipper's own AES acceleration is hardcoded to AES256, and the
-  Meshtastic default channel uses AES128.
+- [tiny-AES-c](https://github.com/kokke/tiny-AES-c), public domain. AES128-CTR.
+  The Flipper's AES acceleration is hardcoded to AES256; the Meshtastic default
+  channel uses AES128.
 - [ElectronicCats/flipper-SX1262-LoRa](https://github.com/ElectronicCats/flipper-SX1262-LoRa),
-  MIT. The SX1262 driver derives from this. Copyright 2024 ElectronicCats.
-  Notice retained in `lib/`.
+  MIT. Source of the SX1262 driver. Copyright 2024 ElectronicCats. Notice
+  retained in `lib/`.
 
-I read the protocol details out of
+Protocol constants come from
 [meshtastic/firmware](https://github.com/meshtastic/firmware) and
-[meshtastic/protobufs](https://github.com/meshtastic/protobufs). I did not
-infer them. Each constant in the source cites the file it came from.
+[meshtastic/protobufs](https://github.com/meshtastic/protobufs). Each constant
+in the source cites its origin file and line.
 
 ## License
 
