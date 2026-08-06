@@ -25,7 +25,10 @@ void mesh_event_from_decoded(
     out->hop_limit = mesh_header_hop_limit(&decoded->header);
     out->hop_start = mesh_header_hop_start(&decoded->header);
 
+    out->portnum = decoded->data.portnum;
+
     if(result != MESH_OK || decoded->data.payload == NULL) return;
+    if(decoded->data.portnum != MESH_PORTNUM_TEXT_MESSAGE_APP) return;
 
     size_t len = decoded->data.payload_len;
     if(len > MESH_TEXT_MAX) {

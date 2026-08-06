@@ -15,11 +15,16 @@
 #include "src/model/node_roster.h"
 #include "src/ble/meshtastic_profile.h"
 #include "src/radio/frame_source.h"
+#include "src/radio/lora_config.h"
 
+/* Frame order mirrors a real device: status first, then messages, then the
+ * node list views, then radio detail. */
 typedef enum {
+    PageHome,
     PageMessages,
-    PageNodes,
-    PageStats,
+    PageNodesHeard,
+    PageNodesSignal,
+    PageLora,
     PageCount,
 } AppPage;
 
@@ -43,6 +48,11 @@ typedef struct {
      * showing an empty screen that looks like a quiet channel. */
     bool source_started;
     uint32_t crc_errors;
+
+    /* Shown on the Home and LoRa frames. Fixed for the life of the app. */
+    LoraConfig lora;
+    char node_name[PHONE_LONG_NAME_MAX];
+    char ble_id[8];
 
     FuriThread* thread;
     volatile bool running;
