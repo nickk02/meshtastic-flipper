@@ -24,8 +24,7 @@ uint8_t mesh_header_hop_limit(const MeshHeader* h) {
 }
 
 uint8_t mesh_header_hop_start(const MeshHeader* h) {
-    return (uint8_t)((h->flags & MESH_FLAG_HOP_START_MASK) >>
-                     MESH_FLAG_HOP_START_SHIFT);
+    return (uint8_t)((h->flags & MESH_FLAG_HOP_START_MASK) >> MESH_FLAG_HOP_START_SHIFT);
 }
 
 bool mesh_header_want_ack(const MeshHeader* h) {

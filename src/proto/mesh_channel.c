@@ -4,8 +4,22 @@
 
 /* Channels.h:153-154. The well-known public default channel key. */
 const uint8_t mesh_default_psk[MESH_PSK_LEN] = {
-    0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
-    0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01,
+    0xd4,
+    0xf1,
+    0xbb,
+    0x3a,
+    0x20,
+    0x29,
+    0x07,
+    0x59,
+    0xf0,
+    0xbc,
+    0xff,
+    0xab,
+    0xcf,
+    0x4e,
+    0x69,
+    0x01,
 };
 
 bool mesh_channel_expand_psk(uint8_t index, uint8_t out[MESH_PSK_LEN]) {
@@ -20,7 +34,8 @@ bool mesh_channel_expand_psk(uint8_t index, uint8_t out[MESH_PSK_LEN]) {
 
 uint8_t mesh_channel_xor_hash(const uint8_t* p, size_t len) {
     uint8_t code = 0;
-    for(size_t i = 0; i < len; i++) code ^= p[i];
+    for(size_t i = 0; i < len; i++)
+        code ^= p[i];
     return code;
 }
 

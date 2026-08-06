@@ -2,9 +2,9 @@
 
 /* Protobuf wire types. Types 3 and 4 are the deprecated group markers and 6 is
    not assigned; none appear in Data, so all are treated as malformed. */
-#define WIRE_VARINT 0
+#define WIRE_VARINT  0
 #define WIRE_FIXED64 1
-#define WIRE_LEN 2
+#define WIRE_LEN     2
 #define WIRE_FIXED32 5
 
 #define FIELD_PORTNUM 1

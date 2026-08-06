@@ -30,11 +30,37 @@ typedef struct {
  * chain is confirmed on the target, and only the radio is left. */
 static const uint8_t sample_frame[] = {
     /* header: to, from, id, flags, channel hash, next_hop, relay_node */
-    0xff, 0xff, 0xff, 0xff, 0x44, 0x33, 0x22, 0x11,
-    0x0d, 0x0c, 0x0b, 0x0a, 0x63, 0x08, 0x00, 0x00,
+    0xff,
+    0xff,
+    0xff,
+    0xff,
+    0x44,
+    0x33,
+    0x22,
+    0x11,
+    0x0d,
+    0x0c,
+    0x0b,
+    0x0a,
+    0x63,
+    0x08,
+    0x00,
+    0x00,
     /* AES128-CTR ciphertext of the Data protobuf */
-    0xfa, 0x8b, 0x3a, 0xed, 0x00, 0xe8, 0x4b, 0x4b,
-    0x41, 0xd2, 0x1e, 0x57, 0xf1, 0x7c,
+    0xfa,
+    0x8b,
+    0x3a,
+    0xed,
+    0x00,
+    0xe8,
+    0x4b,
+    0x4b,
+    0x41,
+    0xd2,
+    0x1e,
+    0x57,
+    0xf1,
+    0x7c,
 };
 
 static bool run_decode_self_test(void) {
@@ -52,8 +78,7 @@ static bool run_decode_self_test(void) {
         return false;
     }
 
-    return decoded.data.payload_len == 10 &&
-           memcmp(decoded.data.payload, "hello mesh", 10) == 0;
+    return decoded.data.payload_len == 10 && memcmp(decoded.data.payload, "hello mesh", 10) == 0;
 }
 
 static void measure_draw(Canvas* canvas, void* ctx) {
@@ -75,8 +100,7 @@ static void measure_draw(Canvas* canvas, void* ctx) {
     snprintf(line, sizeof(line), "Watermark:  %u", (unsigned)state->heap_watermark);
     canvas_draw_str(canvas, 2, 44, line);
 
-    snprintf(
-        line, sizeof(line), "Decode core: %s", state->decode_ok ? "PASS" : "FAIL");
+    snprintf(line, sizeof(line), "Decode core: %s", state->decode_ok ? "PASS" : "FAIL");
     canvas_draw_str(canvas, 2, 56, line);
 
     canvas_draw_str(canvas, 96, 11, "Back");

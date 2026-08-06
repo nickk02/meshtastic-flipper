@@ -22,10 +22,7 @@
  *   bytes 12-15  block counter, starts at zero
  *
  * Bytes 4 to 7 are therefore always zero in practice. */
-void mesh_crypto_build_nonce(
-    uint32_t packet_id,
-    uint32_t from_node,
-    uint8_t nonce[MESH_NONCE_LEN]);
+void mesh_crypto_build_nonce(uint32_t packet_id, uint32_t from_node, uint8_t nonce[MESH_NONCE_LEN]);
 
 /* AES128-CTR over len bytes.
  *

@@ -9,14 +9,14 @@
 #include <stdint.h>
 
 /* RadioInterface.h:20-21. */
-#define MESH_HEADER_LEN 16
+#define MESH_HEADER_LEN  16
 #define MESH_MAX_PAYLOAD 255
 
 /* RadioInterface.h:24-28. */
-#define MESH_FLAG_HOP_LIMIT_MASK 0x07
-#define MESH_FLAG_WANT_ACK_MASK 0x08
-#define MESH_FLAG_VIA_MQTT_MASK 0x10
-#define MESH_FLAG_HOP_START_MASK 0xE0
+#define MESH_FLAG_HOP_LIMIT_MASK  0x07
+#define MESH_FLAG_WANT_ACK_MASK   0x08
+#define MESH_FLAG_VIA_MQTT_MASK   0x10
+#define MESH_FLAG_HOP_START_MASK  0xE0
 #define MESH_FLAG_HOP_START_SHIFT 5
 
 /* Wire layout of PacketHeader. RadioInterface.h:36-53.

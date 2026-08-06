@@ -4,10 +4,7 @@
 
 #include "aes.h"
 
-void mesh_crypto_build_nonce(
-    uint32_t packet_id,
-    uint32_t from_node,
-    uint8_t nonce[MESH_NONCE_LEN]) {
+void mesh_crypto_build_nonce(uint32_t packet_id, uint32_t from_node, uint8_t nonce[MESH_NONCE_LEN]) {
     memset(nonce, 0, MESH_NONCE_LEN);
 
     /* Written byte-wise rather than memcpy of a uint32_t so the wire layout is
