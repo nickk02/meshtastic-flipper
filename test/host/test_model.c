@@ -4,6 +4,7 @@
 #include "mesh_event.h"
 #include "message_ring.h"
 #include "node_roster.h"
+#include "src/proto/mesh_user.h"
 #include "vectors.h"
 
 static void decode_vec0(MeshDecoded* out, MeshDecodeResult* result) {
@@ -17,6 +18,7 @@ static MeshEvent make_event(uint32_t from, const char* text, int16_t rssi, int8_
     memset(&e, 0, sizeof(e));
     e.from = from;
     e.result = MESH_OK;
+    e.portnum = MESH_PORTNUM_TEXT_MESSAGE_APP;
     e.rssi = rssi;
     e.snr = snr;
     e.text_len = (uint8_t)strlen(text);
@@ -295,6 +297,126 @@ TEST(test_roster_tolerates_null) {
     ASSERT_TRUE(node_roster_get(NULL, 0) == NULL);
 }
 
+/* NODEINFO routing */
+
+TEST(test_ring_ignores_nodeinfo) {
+    /* A NODEINFO decodes cleanly but is not a chat message. Without the
+       portnum check it would appear in the message list as raw protobuf. */
+    MessageRing ring;
+    message_ring_init(&ring);
+
+    MeshEvent e = make_event(1, "not a message", 0, 0);
+    e.portnum = MESH_PORTNUM_NODEINFO_APP;
+    message_ring_push(&ring, &e);
+
+    ASSERT_EQ_INT(message_ring_count(&ring), 0);
+}
+
+TEST(test_roster_learns_names_from_user) {
+    NodeRoster r;
+    MeshUser u;
+    node_roster_init(&r);
+    memset(&u, 0, sizeof(u));
+    strcpy(u.long_name, "Base Station");
+    strcpy(u.short_name, "BASE");
+    u.has_long_name = true;
+    u.has_short_name = true;
+
+    node_roster_set_user(&r, 0x1234, &u, 500);
+    ASSERT_EQ_INT(node_roster_count(&r), 1);
+
+    const MeshNode* n = node_roster_get(&r, 0);
+    ASSERT_TRUE(n->has_name);
+    ASSERT_EQ_MEM(n->long_name, "Base Station", 12);
+    ASSERT_EQ_MEM(n->short_name, "BASE", 4);
+}
+
+TEST(test_roster_creates_entry_for_unheard_node) {
+    /* A NODEINFO can arrive for a node we have not otherwise heard. It should
+       still be listed. */
+    NodeRoster r;
+    MeshUser u;
+    node_roster_init(&r);
+    memset(&u, 0, sizeof(u));
+    strcpy(u.short_name, "NEW");
+    u.has_short_name = true;
+
+    node_roster_set_user(&r, 0xABCD, &u, 100);
+    ASSERT_EQ_INT(node_roster_count(&r), 1);
+    ASSERT_EQ_INT(node_roster_get(&r, 0)->node_num, 0xABCD);
+}
+
+TEST(test_display_name_prefers_long_then_short_then_hex) {
+    NodeRoster r;
+    MeshUser u;
+    char scratch[16];
+    node_roster_init(&r);
+
+    /* No name yet: falls back to the low hex digits. */
+    MeshEvent e = make_event(0xDEAD1234, "x", 0, 0);
+    node_roster_observe(&r, &e, 10);
+    ASSERT_EQ_MEM(
+        node_roster_display_name(node_roster_get(&r, 0), scratch, sizeof(scratch)), "1234", 4);
+
+    /* Short name only. */
+    memset(&u, 0, sizeof(u));
+    strcpy(u.short_name, "SHRT");
+    u.has_short_name = true;
+    node_roster_set_user(&r, 0xDEAD1234, &u, 20);
+    ASSERT_EQ_MEM(
+        node_roster_display_name(node_roster_get(&r, 0), scratch, sizeof(scratch)), "SHRT", 4);
+
+    /* Long name wins once it arrives. */
+    memset(&u, 0, sizeof(u));
+    strcpy(u.long_name, "Long Name Here");
+    u.has_long_name = true;
+    node_roster_set_user(&r, 0xDEAD1234, &u, 30);
+    ASSERT_EQ_MEM(
+        node_roster_display_name(node_roster_get(&r, 0), scratch, sizeof(scratch)),
+        "Long Name Here",
+        14);
+}
+
+TEST(test_roster_records_hops_away) {
+    /* hop_start minus hop_limit is how many relays a frame crossed. */
+    NodeRoster r;
+    node_roster_init(&r);
+
+    MeshEvent direct = make_event(0x111, "x", 0, 0);
+    direct.hop_start = 3;
+    direct.hop_limit = 3;
+    node_roster_observe(&r, &direct, 10);
+
+    MeshEvent relayed = make_event(0x222, "x", 0, 0);
+    relayed.hop_start = 3;
+    relayed.hop_limit = 1;
+    node_roster_observe(&r, &relayed, 20);
+
+    const MeshNode* a = NULL;
+    const MeshNode* b = NULL;
+    for(size_t i = 0; i < node_roster_count(&r); i++) {
+        const MeshNode* n = node_roster_get(&r, i);
+        if(n->node_num == 0x111) a = n;
+        if(n->node_num == 0x222) b = n;
+    }
+    ASSERT_TRUE(a != NULL && b != NULL);
+    ASSERT_TRUE(a->has_hops);
+    ASSERT_EQ_INT(a->hops_away, 0);
+    ASSERT_EQ_INT(b->hops_away, 2);
+}
+
+TEST(test_roster_hops_absent_when_header_carried_none) {
+    /* hop_start of 0 means the frame never carried the field, which is not
+       the same as a confirmed direct neighbour. */
+    NodeRoster r;
+    node_roster_init(&r);
+    MeshEvent e = make_event(0x333, "x", 0, 0);
+    e.hop_start = 0;
+    e.hop_limit = 0;
+    node_roster_observe(&r, &e, 10);
+    ASSERT_TRUE(!node_roster_get(&r, 0)->has_hops);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_event_from_real_decode);
 RUN_TEST(test_event_keeps_header_on_failed_decode);
@@ -315,4 +437,10 @@ RUN_TEST(test_roster_evicts_least_recently_heard_when_full);
 RUN_TEST(test_roster_records_failed_decodes);
 RUN_TEST(test_roster_ignores_unparseable_sender);
 RUN_TEST(test_roster_tolerates_null);
+RUN_TEST(test_ring_ignores_nodeinfo);
+RUN_TEST(test_roster_learns_names_from_user);
+RUN_TEST(test_roster_creates_entry_for_unheard_node);
+RUN_TEST(test_display_name_prefers_long_then_short_then_hex);
+RUN_TEST(test_roster_records_hops_away);
+RUN_TEST(test_roster_hops_absent_when_header_carried_none);
 TEST_MAIN_END()

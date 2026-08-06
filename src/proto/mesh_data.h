@@ -13,9 +13,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Confirmed from protobufs/meshtastic/portnums.proto via the meshtastic
-   Python package: PortNum.TEXT_MESSAGE_APP == 1. */
+/* portnums.proto. TEXT_MESSAGE_APP confirmed via the meshtastic Python
+ * package; the rest read from the proto directly.
+ *
+ * NODEINFO_APP carries a User message, which is where node names come from.
+ * Nothing else is decoded, so those portnums are counted and dropped. */
 #define MESH_PORTNUM_TEXT_MESSAGE_APP 1
+#define MESH_PORTNUM_POSITION_APP     3
+#define MESH_PORTNUM_NODEINFO_APP     4
 
 /* Decoded subset of Data.
  *

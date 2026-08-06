@@ -1,5 +1,6 @@
 #include "node_roster.h"
 
+#include <stdio.h>
 #include <string.h>
 
 void node_roster_init(NodeRoster* roster) {
@@ -49,6 +50,16 @@ bool node_roster_observe(NodeRoster* roster, const MeshEvent* event, uint32_t no
     node->snr = event->snr;
     node->last_seen_ms = now_ms;
     node->packets++;
+
+    /* hop_start is what the sender set; hop_limit is what survived the trip.
+     * The difference is how many relays it crossed. Both zero happens on
+     * frames that never carried the fields, so that is not treated as a
+     * confirmed direct neighbour. */
+    if(event->hop_start > 0) {
+        node->hops_away = (uint8_t)(event->hop_start - event->hop_limit);
+        node->has_hops = true;
+    }
+
     return added;
 }
 
@@ -82,4 +93,53 @@ const MeshNode* node_roster_get(const NodeRoster* roster, size_t index) {
         if(ahead == index) return &roster->items[i];
     }
     return NULL;
+}
+
+/* Splits out the find-or-create step so a NODEINFO for a node we have not
+ * heard directly still gets an entry. */
+static MeshNode* find_or_create(NodeRoster* roster, uint32_t node_num, uint32_t now_ms) {
+    MeshNode* node = find(roster, node_num);
+    if(node != NULL) return node;
+
+    if(roster->count < NODE_ROSTER_CAPACITY) {
+        node = &roster->items[roster->count];
+        roster->count++;
+    } else {
+        node = oldest(roster);
+    }
+    memset(node, 0, sizeof(*node));
+    node->node_num = node_num;
+    node->last_seen_ms = now_ms;
+    return node;
+}
+
+void node_roster_set_user(
+    NodeRoster* roster,
+    uint32_t node_num,
+    const MeshUser* user,
+    uint32_t now_ms) {
+    if(roster == NULL || user == NULL || node_num == 0) return;
+
+    MeshNode* node = find_or_create(roster, node_num, now_ms);
+
+    if(user->has_long_name) {
+        memcpy(node->long_name, user->long_name, sizeof(node->long_name));
+        node->has_name = true;
+    }
+    if(user->has_short_name) {
+        memcpy(node->short_name, user->short_name, sizeof(node->short_name));
+        node->has_name = true;
+    }
+}
+
+const char* node_roster_display_name(const MeshNode* node, char* scratch, size_t scratch_len) {
+    if(node == NULL) return "";
+
+    if(node->long_name[0]) return node->long_name;
+    if(node->short_name[0]) return node->short_name;
+
+    /* No NODEINFO heard yet. Real devices show the node number too, as the low
+     * hex digits, so an unnamed node is still identifiable. */
+    snprintf(scratch, scratch_len, "%04lx", (unsigned long)(node->node_num & 0xFFFF));
+    return scratch;
 }

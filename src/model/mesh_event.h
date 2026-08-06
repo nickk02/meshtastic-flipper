@@ -35,6 +35,7 @@ typedef struct {
     int8_t snr;
 
     MeshDecodeResult result;
+    uint32_t portnum;
 
     uint8_t text[MESH_TEXT_MAX];
     uint8_t text_len;

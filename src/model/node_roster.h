@@ -14,6 +14,7 @@
 #include <stdint.h>
 
 #include "src/model/mesh_event.h"
+#include "src/proto/mesh_user.h"
 
 #define NODE_ROSTER_CAPACITY 32
 
@@ -23,6 +24,19 @@ typedef struct {
     int8_t snr; /* most recent */
     uint32_t packets;
     uint32_t last_seen_ms;
+
+    /* Learned from NODEINFO_APP packets. Empty until one arrives, which is
+     * why the UI falls back to the hex node number. A real device does the
+     * same thing while a node is still unknown. */
+    char long_name[MESH_USER_LONG_NAME_MAX];
+    char short_name[MESH_USER_SHORT_NAME_MAX];
+    bool has_name;
+
+    /* hop_start minus hop_limit. Zero means a direct neighbour, which is the
+     * only case where signal strength is meaningful: for anything relayed,
+     * RSSI describes the last hop, not the originator. */
+    uint8_t hops_away;
+    bool has_hops;
 } MeshNode;
 
 typedef struct {
@@ -44,6 +58,18 @@ void node_roster_init(NodeRoster* roster);
  *
  * Returns true if this added a new node. */
 bool node_roster_observe(NodeRoster* roster, const MeshEvent* event, uint32_t now_ms);
+
+/* Attach a name learned from a NODEINFO_APP packet. Creates the entry if the
+ * node has not been heard from yet. */
+void node_roster_set_user(
+    NodeRoster* roster,
+    uint32_t node_num,
+    const MeshUser* user,
+    uint32_t now_ms);
+
+/* What to show for a node: long name, else short name, else the low 4 hex
+ * digits of its number. Never returns NULL. */
+const char* node_roster_display_name(const MeshNode* node, char* scratch, size_t scratch_len);
 
 size_t node_roster_count(const NodeRoster* roster);
 

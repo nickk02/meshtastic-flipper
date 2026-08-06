@@ -5,6 +5,7 @@
 
 #include "src/proto/mesh_channel.h"
 #include "src/model/mesh_event.h"
+#include "src/proto/mesh_user.h"
 #include "src/ble/meshtastic_profile.h"
 #include "src/radio/source_radio.h"
 #include "src/ui/app_view.h"
@@ -50,6 +51,15 @@ static int32_t radio_thread(void* context) {
         message_ring_push(&app->messages, &event);
         node_roster_observe(&app->roster, &event, furi_get_tick());
 
+        /* NODEINFO_APP carries a User message. It is how the node list gets
+         * real names instead of hex numbers. portnums.proto:57-61. */
+        if(result == MESH_OK && decoded.data.portnum == MESH_PORTNUM_NODEINFO_APP) {
+            MeshUser user;
+            if(mesh_user_parse(decoded.data.payload, decoded.data.payload_len, &user)) {
+                node_roster_set_user(&app->roster, event.from, &user, furi_get_tick());
+            }
+        }
+
         app->crc_errors = source_radio_crc_errors(app->source);
 
         size_t copy = raw.len < RAW_FRAME_MAX ? raw.len : RAW_FRAME_MAX;
@@ -72,7 +82,7 @@ MeshApp* mesh_app_alloc(void) {
     message_ring_init(&app->messages);
     node_roster_init(&app->roster);
 
-    app->page = PageMessages;
+    app->page = PageHome;
     app->scroll = 0;
 
     /* The SX1262 is the only frame source. */
@@ -87,6 +97,13 @@ MeshApp* mesh_app_alloc(void) {
         0x7FFFFFFFu;
     PhoneIdentity identity;
     phone_identity_init(&identity, node_num, "Flipper Mesh", "FLPR");
+
+    /* Cached for the UI. The LoRa frame shows what the radio is actually
+     * tuned to, so it comes from the same config the driver uses. */
+    lora_config_us_longfast(LORA_PRIMARY_CHANNEL_NAME, &app->lora);
+    strncpy(app->node_name, identity.long_name, sizeof(app->node_name) - 1);
+    /* Real devices show the last two bytes of the BLE MAC here. */
+    snprintf(app->ble_id, sizeof(app->ble_id), "%02x%02x", mac[4], mac[5]);
     app->ble = meshtastic_ble_start(&identity);
 
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));

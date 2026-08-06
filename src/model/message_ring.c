@@ -10,6 +10,9 @@ void message_ring_init(MessageRing* ring) {
 void message_ring_push(MessageRing* ring, const MeshEvent* event) {
     if(ring == NULL || event == NULL) return;
     if(event->result != MESH_OK) return;
+    /* NODEINFO decodes successfully but is not a chat message. Without this it
+     * would appear in the message list as a line of protobuf. */
+    if(event->portnum != MESH_PORTNUM_TEXT_MESSAGE_APP) return;
 
     MeshMessage* slot = &ring->items[ring->head];
     memset(slot, 0, sizeof(*slot));

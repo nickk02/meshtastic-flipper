@@ -45,7 +45,11 @@ MeshDecodeResult mesh_decode_frame(
         return MESH_ERR_BAD_PROTOBUF;
     }
 
-    if(out->data.portnum != MESH_PORTNUM_TEXT_MESSAGE_APP) {
+    /* Two portnums are understood. Everything else decoded cleanly but is not
+     * something this app renders, which is a different outcome from a decode
+     * failure and is counted separately. */
+    if(out->data.portnum != MESH_PORTNUM_TEXT_MESSAGE_APP &&
+       out->data.portnum != MESH_PORTNUM_NODEINFO_APP) {
         return MESH_ERR_NOT_TEXT;
     }
 
