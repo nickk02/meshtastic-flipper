@@ -1,0 +1,2 @@
+cryptography>=42.0
+meshtastic>=2.3
