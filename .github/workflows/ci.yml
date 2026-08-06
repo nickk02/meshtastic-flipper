@@ -94,7 +94,7 @@ jobs:
             echo "$f: $(stat -c%s "$f") bytes"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: meshtastic-fap-api${{ steps.build.outputs.api-version }}
           path: ${{ steps.build.outputs.fap-artifacts }}
