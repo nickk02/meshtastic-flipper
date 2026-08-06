@@ -98,13 +98,22 @@ TEST(test_little_endian_decode) {
 TEST(test_field_offsets_are_distinct) {
     /* Every field gets a unique value so a wrong offset cannot pass. */
     uint8_t frame[MESH_HEADER_LEN] = {
-        0x11, 0x00, 0x00, 0x00, /* to */
-        0x22, 0x00, 0x00, 0x00, /* from */
-        0x33, 0x00, 0x00, 0x00, /* id */
-        0x44,                   /* flags */
-        0x55,                   /* channel */
-        0x66,                   /* next_hop */
-        0x77,                   /* relay_node */
+        0x11,
+        0x00,
+        0x00,
+        0x00, /* to */
+        0x22,
+        0x00,
+        0x00,
+        0x00, /* from */
+        0x33,
+        0x00,
+        0x00,
+        0x00, /* id */
+        0x44, /* flags */
+        0x55, /* channel */
+        0x66, /* next_hop */
+        0x77, /* relay_node */
     };
     MeshHeader h;
 

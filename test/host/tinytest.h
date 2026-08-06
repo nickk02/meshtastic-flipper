@@ -20,11 +20,10 @@ static const char* tt_current = "";
         name();             \
     } while(0)
 
-#define TT_FAIL(fmt, ...)                                                    \
-    do {                                                                     \
-        tt_failures++;                                                       \
-        printf("FAIL %s (%s:%d): " fmt "\n", tt_current, __FILE__, __LINE__, \
-               ##__VA_ARGS__);                                               \
+#define TT_FAIL(fmt, ...)                                                                    \
+    do {                                                                                     \
+        tt_failures++;                                                                       \
+        printf("FAIL %s (%s:%d): " fmt "\n", tt_current, __FILE__, __LINE__, ##__VA_ARGS__); \
     } while(0)
 
 #define ASSERT_TRUE(cond)                 \
@@ -45,26 +44,29 @@ static const char* tt_current = "";
    -Wunused-function under -Werror. */
 static inline void tt_dump(const char* label, const unsigned char* p, size_t n) {
     printf("  %s:", label);
-    for(size_t i = 0; i < n; i++) printf(" %02x", p[i]);
+    for(size_t i = 0; i < n; i++)
+        printf(" %02x", p[i]);
     printf("\n");
 }
 
-#define ASSERT_EQ_MEM(a, b, len)                                       \
-    do {                                                               \
-        tt_checks++;                                                   \
-        if(memcmp((a), (b), (len)) != 0) {                             \
-            TT_FAIL("%s != %s over %d bytes", #a, #b, (int)(len));     \
-            tt_dump("got     ", (const unsigned char*)(a), (len));     \
-            tt_dump("expected", (const unsigned char*)(b), (len));     \
-        }                                                              \
+#define ASSERT_EQ_MEM(a, b, len)                                   \
+    do {                                                           \
+        tt_checks++;                                               \
+        if(memcmp((a), (b), (len)) != 0) {                         \
+            TT_FAIL("%s != %s over %d bytes", #a, #b, (int)(len)); \
+            tt_dump("got     ", (const unsigned char*)(a), (len)); \
+            tt_dump("expected", (const unsigned char*)(b), (len)); \
+        }                                                          \
     } while(0)
 
 #define TEST_MAIN_BEGIN() int main(void) {
-
-#define TEST_MAIN_END()                                                \
-    printf("%s: %d checks, %d failures\n",                             \
-           tt_failures ? "FAILED" : "PASSED", tt_checks, tt_failures); \
-    return tt_failures ? 1 : 0;                                        \
+#define TEST_MAIN_END()                    \
+    printf(                                \
+        "%s: %d checks, %d failures\n",    \
+        tt_failures ? "FAILED" : "PASSED", \
+        tt_checks,                         \
+        tt_failures);                      \
+    return tt_failures ? 1 : 0;            \
     }
 
 #endif
