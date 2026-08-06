@@ -18,6 +18,7 @@ App(
         "src/proto/*.c",
         "src/model/*.c",
         "src/radio/*.c",
+        "src/ble/*.c",
         "src/ui/*.c",
     ],
     fap_private_libs=[
