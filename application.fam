@@ -1,0 +1,27 @@
+App(
+    appid="meshtastic_flipper",
+    name="Meshtastic",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="meshtastic_flipper_app",
+    stack_size=2 * 1024,
+    fap_category="Tools",
+    fap_description="Meshtastic LoRa receiver. Requires an external SX1262 module.",
+    fap_author="nickk02",
+    fap_version="0.1",
+    # Listed explicitly, because the default glob also pulls in test/host,
+    # which is PC-only code that has no business in the firmware build.
+    sources=[
+        "meshtastic_flipper.c",
+        "src/proto/*.c",
+    ],
+    fap_private_libs=[
+        # tiny-AES-c selects its modes with #ifndef guards, so configuring it
+        # here keeps the vendored sources byte-identical to upstream.
+        Lib(
+            name="tiny-AES-c",
+            fap_include_paths=["."],
+            sources=["aes.c"],
+            cdefines=["CBC=0", "ECB=0", "CTR=1"],
+        ),
+    ],
+)
