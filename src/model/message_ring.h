@@ -11,7 +11,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "mesh_event.h"
+#include "src/model/mesh_event.h"
 
 #define MESSAGE_RING_CAPACITY 16
 

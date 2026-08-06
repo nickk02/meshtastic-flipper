@@ -27,6 +27,11 @@ typedef enum {
     MESH_ERR_NOT_TEXT,
 } MeshDecodeResult;
 
+/* Number of values in MeshDecodeResult, for sizing counter arrays. Kept as a
+ * define rather than an enum member so switch statements over the enum stay
+ * exhaustive and the compiler keeps warning about unhandled cases. */
+#define MESH_RESULT_COUNT 5
+
 typedef struct {
     MeshHeader header;
     MeshData data;

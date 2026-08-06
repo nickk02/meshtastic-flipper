@@ -14,7 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "mesh_decode.h"
+#include "src/proto/mesh_decode.h"
 
 /* Meshtastic allows longer text, but the Flipper screen is 128px wide and this
  * is a receiver, not an archive. Longer messages are truncated for display and

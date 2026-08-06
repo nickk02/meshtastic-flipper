@@ -13,7 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "mesh_event.h"
+#include "src/model/mesh_event.h"
 
 #define NODE_ROSTER_CAPACITY 32
 

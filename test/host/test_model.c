@@ -241,7 +241,8 @@ TEST(test_roster_every_index_is_reachable_and_unique) {
     for(size_t i = 0; i < 5; i++) {
         const MeshNode* n = node_roster_get(&r, i);
         ASSERT_TRUE(n != NULL);
-        for(size_t j = 0; j < i; j++) ASSERT_TRUE(seen[j] != n->node_num);
+        for(size_t j = 0; j < i; j++)
+            ASSERT_TRUE(seen[j] != n->node_num);
         seen[i] = n->node_num;
     }
 }

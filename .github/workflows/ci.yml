@@ -49,7 +49,15 @@ jobs:
             echo "Regenerate with: python test/tools/gen_vectors.py > test/host/vectors.h"
             exit 1
           fi
-          echo "Committed vectors match the generator."
+          python test/tools/gen_vectors.py --sim-frames /tmp/sim_frames.h
+          if ! diff -u src/radio/sim_frames.h /tmp/sim_frames.h; then
+            echo
+            echo "src/radio/sim_frames.h does not match gen_vectors.py output."
+            echo "Regenerate with:"
+            echo "  python test/tools/gen_vectors.py --sim-frames src/radio/sim_frames.h"
+            exit 1
+          fi
+          echo "Committed vectors and sim frames both match the generator."
 
   proto-isolation:
     name: Protocol layer has no Flipper dependencies

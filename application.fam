@@ -14,7 +14,11 @@ App(
     # which is PC-only code that has no business in the firmware build.
     sources=[
         "meshtastic_flipper.c",
+        "src/*.c",
         "src/proto/*.c",
+        "src/model/*.c",
+        "src/radio/*.c",
+        "src/ui/*.c",
     ],
     fap_private_libs=[
         # tiny-AES-c selects its modes with #ifndef guards, so configuring it
