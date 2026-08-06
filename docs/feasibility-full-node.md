@@ -100,8 +100,8 @@ boundary between "receive and display" and "be a node."
 
 Even on a deliberately generous estimate of compiled ARM Thumb-2 density, tens
 of thousands of lines of C++ produces hundreds of kilobytes of code. Set against
-a ceiling around 100KB of free heap, the arithmetic does not work at any
-plausible density. This is why no amount of careful engineering closes it.
+a measured ceiling of about 128KB of free heap, the arithmetic does not work at
+any plausible density. This is why no amount of careful engineering closes it.
 
 ## 4. What each capability would additionally require
 

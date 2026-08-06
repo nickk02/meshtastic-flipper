@@ -51,8 +51,8 @@ git clone --depth=1 https://github.com/meshtastic/protobufs.git
 
 | File | Responsibility |
 | --- | --- |
-| `vendor/tiny-AES-c/aes.c`, `aes.h` | Public domain AES128 core, CTR mode. Unmodified except config. |
-| `vendor/tiny-AES-c/aes_config.h` | Our build config: AES128 on, CBC/ECB off. |
+| `lib/tiny-AES-c/aes.c`, `aes.h` | Public domain AES128 core, CTR mode. Unmodified except config. |
+| `application.fam` `fap_private_libs` | Build config for the AES lib, so vendored sources stay unmodified. |
 | `src/proto/mesh_channel.h/.c` | `defaultpsk` bytes, short-PSK expansion, channel hash. |
 | `src/proto/mesh_crypto.h/.c` | Nonce construction, AES-CTR wrapper over tiny-AES-c. |
 | `src/proto/mesh_header.h/.c` | 16-byte `PacketHeader` parse, flag bit accessors. |
@@ -373,7 +373,7 @@ OUT=build
 mkdir -p "$OUT"
 
 CFLAGS="-std=c99 -Wall -Wextra -Werror -O1 -g"
-INCLUDES="-I. -I$ROOT/src/proto -I$ROOT/vendor/tiny-AES-c"
+INCLUDES="-I. -I$ROOT/src/proto -I$ROOT/lib/tiny-AES-c"
 
 status=0
 for src in test_*.c; do
@@ -382,7 +382,7 @@ for src in test_*.c; do
     # shellcheck disable=SC2086
     gcc $CFLAGS $INCLUDES -o "$OUT/$name.exe" "$src" \
         $(ls "$ROOT"/src/proto/*.c 2>/dev/null || true) \
-        $(ls "$ROOT"/vendor/tiny-AES-c/aes.c 2>/dev/null || true)
+        $(ls "$ROOT"/lib/tiny-AES-c/aes.c 2>/dev/null || true)
     echo "--- $name"
     if ! "./$OUT/$name.exe"; then
         status=1
@@ -427,8 +427,8 @@ git commit -m "Add dependency-free host test harness"
 ### Task 3: Vendor tiny-AES-c and prove it against OpenSSL
 
 **Files:**
-- Create: `vendor/tiny-AES-c/aes.c`, `vendor/tiny-AES-c/aes.h`, `vendor/tiny-AES-c/LICENSE`
-- Create: `vendor/tiny-AES-c/README-vendoring.md`
+- Create: `lib/tiny-AES-c/aes.c`, `lib/tiny-AES-c/aes.h`, `lib/tiny-AES-c/LICENSE`
+- Create: `lib/tiny-AES-c/README-vendoring.md`
 - Create: `test/host/test_aes.c`
 
 **Interfaces:**
@@ -445,10 +445,10 @@ cd .local-scratch
 git clone --depth=1 https://github.com/kokke/tiny-AES-c.git
 cd ..
 cp .local-scratch/tiny-AES-c/aes.c .local-scratch/tiny-AES-c/aes.h \
-   .local-scratch/tiny-AES-c/LICENSE vendor/tiny-AES-c/
+   .local-scratch/tiny-AES-c/LICENSE lib/tiny-AES-c/
 ```
 
-Create `vendor/tiny-AES-c/README-vendoring.md`:
+Create `lib/tiny-AES-c/README-vendoring.md`:
 
 ```markdown
 # tiny-AES-c
@@ -470,7 +470,7 @@ not "fix" this difference.
 
 - [ ] **Step 2: Configure it for AES128 and CTR only**
 
-Edit `vendor/tiny-AES-c/aes.h` so the configuration block reads:
+Edit `lib/tiny-AES-c/aes.h` so the configuration block reads:
 
 ```c
 #define CBC 0
@@ -552,7 +552,7 @@ known-answer test edited to match its own output tests nothing.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add vendor/tiny-AES-c test/host/test_aes.c
+git add lib/tiny-AES-c test/host/test_aes.c
 git commit -m "Vendor tiny-AES-c and add AES128-CTR known answer test"
 ```
 

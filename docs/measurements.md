@@ -88,21 +88,28 @@ For context on where the RAM goes: `RAM1` is 196,600 bytes
 firmware's static data and stacks. With the system idle and this app running,
 firmware and services occupy roughly 59KB of that heap.
 
-**The watermark deserves attention.** `memmgr_get_minimum_free_heap` is
-`xPortGetMinimumEverFreeHeapSize` (`furi/core/memmgr.c:58-60`), the lowest free
-heap since boot. A reading of 2,784 bytes means the device came within about
-2.7KB of exhausting its heap at some point in that session.
+**The watermark needed a second reading, and it came out fine.**
+`memmgr_get_minimum_free_heap` is `xPortGetMinimumEverFreeHeapSize`
+(`furi/core/memmgr.c:58-60`), the lowest free heap since boot, so it is
+sensitive to whatever else happened in the session.
 
-This does not threaten the current design, which allocates nothing in the
-receive path and keeps under 5KB of static state. It does mean **128KB is the
-quiet-state figure, not a guarantee**. Something on the device, most likely the
-app loader relocating a FAP or a service loading assets, can transiently
-consume nearly all of it.
+| Session | Free | Watermark |
+| --- | --- | --- |
+| After USB install | 128,728 | 2,784 |
+| After a clean reboot | 129,792 | 114,408 |
 
-Practical consequence: keep allocating nothing on the hot path, and do not size
-future buffers against 128KB as though it were always available. Worth
-re-reading the watermark after a clean reboot to establish a baseline, since
-this reading includes whatever happened during install over USB.
+The first reading suggested the device had come within 2.7KB of exhausting its
+heap. The reboot shows that is not the steady state: on a clean boot, free heap
+never drops below about 114KB. The 2,784 figure came from the install session
+itself, most likely USB file transfer and the loader relocating a FAP.
+
+Practical reading: **about 114KB is reliably available even at the worst moment
+of a normal boot**, and 128KB is the idle figure. Heavy USB or file operations
+can transiently consume far more, so the existing discipline still applies:
+allocate nothing on the receive path, keep state static. But there is no
+memory-pressure problem to design around.
+
+Self test reported PASS in both sessions.
 
 ### Effect on the full-node feasibility argument
 
