@@ -77,6 +77,17 @@ Flipper header. It takes byte buffers in and plain structs out, allocates
 nothing, and knows nothing about SPI or threads. That is why the crypto and
 decode path can be proven correct on a PC before any radio exists.
 
+## Installing
+
+Grab `meshtastic.fap` from the
+[latest release](https://github.com/nickk02/meshtastic-flipper/releases) and
+copy it to `apps/Tools/` on the SD card. It appears under Apps, Tools,
+Meshtastic.
+
+Releases are built against official firmware on the release channel. Custom
+firmware such as Momentum, Unleashed or RogueMaster may reject the app with an
+API mismatch, in which case it needs rebuilding against that SDK.
+
 ## Building
 
 The app is built with [ufbt](https://github.com/flipperdevices/flipperzero-ufbt):
@@ -86,11 +97,27 @@ ufbt
 ufbt launch
 ```
 
+The artifact lands at `dist/meshtastic.fap`.
+
 The PC-side tests need gcc and do not need a Flipper:
 
 ```
 bash test/host/run_tests.sh
 ```
+
+## CI
+
+Every push and pull request runs four checks:
+
+- the host test suite
+- a regeneration of `test/host/vectors.h`, compared against the committed copy,
+  so the vectors cannot silently drift from their generator
+- a guard that `src/proto/` includes no Flipper headers and performs no
+  allocation, since the whole testing approach depends on that boundary holding
+- a FAP build, with the artifact attached to the run
+
+Pushing a `v*` tag builds and publishes a release, but only after the host
+suite passes on that commit.
 
 Regenerating the test vectors additionally needs Python with `cryptography`
 and `meshtastic` installed. The generated header is committed, so this is only

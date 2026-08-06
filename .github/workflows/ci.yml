@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compiler version
+        run: gcc --version
+
+      - name: Run the host suite
+        run: bash test/host/run_tests.sh
+
+  vectors-reproducible:
+    name: Test vectors match the generator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install generator dependencies
+        run: python -m pip install --quiet -r test/tools/requirements.txt
+
+      # vectors.h is committed so the tests run without Python. That only stays
+      # trustworthy if the committed file still matches what the generator
+      # produces, which is what this checks. It also catches anyone hand
+      # editing the generated header.
+      - name: Regenerate and compare
+        run: |
+          python test/tools/gen_vectors.py > /tmp/vectors.h
+          if ! diff -u test/host/vectors.h /tmp/vectors.h; then
+            echo
+            echo "test/host/vectors.h does not match gen_vectors.py output."
+            echo "Regenerate with: python test/tools/gen_vectors.py > test/host/vectors.h"
+            exit 1
+          fi
+          echo "Committed vectors match the generator."
+
+  proto-isolation:
+    name: Protocol layer has no Flipper dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The whole M0 approach rests on src/proto being host-compilable. If a
+      # Flipper header or an allocation creeps in, the layer stops being
+      # testable on a PC and we lose the ability to isolate radio faults.
+      - name: No Flipper headers
+        run: |
+          if grep -rnE '^[[:space:]]*#[[:space:]]*include.*(furi|gui/|input/|storage/)' src/proto/; then
+            echo "src/proto must not include Flipper headers"
+            exit 1
+          fi
+          echo "clean"
+
+      - name: No dynamic allocation
+        run: |
+          if grep -rnE '\b(malloc|calloc|realloc|free)\s*\(' src/proto/; then
+            echo "src/proto must not allocate; callers supply all buffers"
+            exit 1
+          fi
+          echo "clean"
+
+  build-fap:
+    name: Build FAP
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with ufbt
+        id: build
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
+        with:
+          sdk-channel: release
+
+      - name: Report size
+        run: |
+          for f in ${{ steps.build.outputs.fap-artifacts }}; do
+            echo "$f: $(stat -c%s "$f") bytes"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meshtastic-fap-api${{ steps.build.outputs.api-version }}
+          path: ${{ steps.build.outputs.fap-artifacts }}
+          if-no-files-found: error
+
+  lint-fap:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ufbt lint
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
+        with:
+          task: lint
+          sdk-channel: release
