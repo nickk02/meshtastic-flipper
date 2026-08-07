@@ -12,6 +12,7 @@
 
 #include "src/proto/mesh_decode.h"
 #include "src/model/message_ring.h"
+#include "src/model/mesh_event.h"
 #include "src/model/node_roster.h"
 #include "src/ble/meshtastic_profile.h"
 #include "src/radio/frame_source.h"
@@ -50,6 +51,13 @@ typedef struct {
     uint32_t crc_errors;
 
     /* Shown on the Home and LoRa frames. Fixed for the life of the app. */
+    /* Working buffers for the radio thread. Kept here rather than as locals
+     * because together they are about 660 bytes, which is a third of that
+     * thread's stack before the decode call frame and the AES key schedule. */
+    RawFrame rx_frame;
+    MeshDecoded rx_decoded;
+    MeshEvent rx_event;
+
     LoraConfig lora;
     char node_name[PHONE_LONG_NAME_MAX];
     char ble_id[8];

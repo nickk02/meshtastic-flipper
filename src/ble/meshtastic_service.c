@@ -56,6 +56,18 @@ struct MeshtasticBleService {
 
     Handshake handshake;
     PhoneIdentity identity;
+
+    /* Owned here rather than declared in the event handler. That handler runs
+     * on the BLE stack's thread, whose stack we neither size nor control, and
+     * HandshakeReply is 408 bytes. A local that large on a foreign thread is
+     * how BLE fails silently or faults. */
+    HandshakeReply reply;
+
+    /* The buffer a FromRadio read is served from. It was a function-static,
+     * which is shared by every service instance and outlives the app. One per
+     * service is both smaller in intent and safe to free. */
+    uint8_t read_scratch[QUEUE_MESSAGE_MAX];
+    uint32_t from_num_value;
     GapSvcEventHandler* event_handler;
 
     MeshtasticBleToRadioCallback callback;
@@ -79,7 +91,6 @@ static bool to_radio_data(const void* context, const uint8_t** data, uint16_t* d
  * An empty read is how the phone learns to stop reading. */
 static bool from_radio_data(const void* context, const uint8_t** data, uint16_t* data_len) {
     MeshtasticBleService* service = (MeshtasticBleService*)context;
-    static uint8_t scratch[QUEUE_MESSAGE_MAX];
 
     if(service == NULL) {
         *data_len = 0;
@@ -97,12 +108,12 @@ static bool from_radio_data(const void* context, const uint8_t** data, uint16_t*
 
     if(service->pending == 0) {
         *data_len = 0;
-        *data = scratch;
+        *data = service->read_scratch;
     } else {
         QueuedMessage* msg = &service->queue[service->tail];
-        memcpy(scratch, msg->data, msg->len);
+        memcpy(service->read_scratch, msg->data, msg->len);
         *data_len = (uint16_t)msg->len;
-        *data = scratch;
+        *data = service->read_scratch;
 
         service->tail = (service->tail + 1) % QUEUE_DEPTH;
         service->pending--;
@@ -114,14 +125,17 @@ static bool from_radio_data(const void* context, const uint8_t** data, uint16_t*
 
 static bool from_num_data(const void* context, const uint8_t** data, uint16_t* data_len) {
     MeshtasticBleService* service = (MeshtasticBleService*)context;
-    static uint32_t counter = 0;
 
     /* FromNum is a doorbell. Its value only has to change to wake the phone,
      * which then reads FromRadio until empty. */
-    if(service != NULL) counter = (uint32_t)service->pending;
+    *data_len = sizeof(service->from_num_value);
+    if(service == NULL) {
+        if(data) *data = NULL;
+        return false;
+    }
 
-    *data_len = sizeof(counter);
-    if(data) *data = (const uint8_t*)&counter;
+    service->from_num_value = (uint32_t)service->pending;
+    if(data) *data = (const uint8_t*)&service->from_num_value;
     return false;
 }
 
@@ -212,12 +226,17 @@ void meshtastic_ble_service_set_callback(
 /* Called when the phone writes ToRadio. Runs the handshake and queues whatever
  * it produces. */
 static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, size_t len) {
-    HandshakeReply reply;
+    /* service->reply is guarded by the same mutex as the queue. Writes only
+     * ever arrive on the BLE thread, so contention is nil, but taking the lock
+     * keeps the invariant simple. */
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    bool have_reply = handshake_handle_to_radio(&service->handshake, data, len, &service->reply);
+    size_t count = have_reply ? service->reply.count : 0;
+    furi_mutex_release(service->mutex);
 
-    if(handshake_handle_to_radio(&service->handshake, data, len, &reply)) {
-        for(size_t i = 0; i < reply.count; i++) {
-            meshtastic_ble_service_queue(service, reply.messages[i].data, reply.messages[i].len);
-        }
+    for(size_t i = 0; i < count; i++) {
+        meshtastic_ble_service_queue(
+            service, service->reply.messages[i].data, service->reply.messages[i].len);
     }
 
     if(service->callback) {

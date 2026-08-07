@@ -26,20 +26,17 @@ static int32_t radio_thread(void* context) {
 
     uint8_t key[MESH_PSK_LEN];
     uint8_t channel_hash;
-    RawFrame raw;
-    MeshDecoded decoded;
-    MeshEvent event;
-
     if(!mesh_channel_expand_psk(PRIMARY_PSK_INDEX, key)) return 0;
     channel_hash = mesh_channel_hash(PRIMARY_CHANNEL_NAME, key, MESH_PSK_LEN);
 
     while(app->running) {
-        if(!app->source->poll(app->source, &raw, 250)) continue;
+        if(!app->source->poll(app->source, &app->rx_frame, 250)) continue;
         if(!app->running) break;
 
-        MeshDecodeResult result =
-            mesh_decode_frame(raw.data, raw.len, key, channel_hash, &decoded);
-        mesh_event_from_decoded(&event, &decoded, result, raw.rssi, raw.snr);
+        MeshDecodeResult result = mesh_decode_frame(
+            app->rx_frame.data, app->rx_frame.len, key, channel_hash, &app->rx_decoded);
+        mesh_event_from_decoded(
+            &app->rx_event, &app->rx_decoded, result, app->rx_frame.rssi, app->rx_frame.snr);
 
         furi_mutex_acquire(app->mutex, FuriWaitForever);
 
@@ -48,22 +45,23 @@ static int32_t radio_thread(void* context) {
 
         /* Both of these ignore what they should ignore, so no filtering here:
          * the ring drops non-text, the roster drops headerless frames. */
-        message_ring_push(&app->messages, &event);
-        node_roster_observe(&app->roster, &event, furi_get_tick());
+        message_ring_push(&app->messages, &app->rx_event);
+        node_roster_observe(&app->roster, &app->rx_event, furi_get_tick());
 
         /* NODEINFO_APP carries a User message. It is how the node list gets
          * real names instead of hex numbers. portnums.proto:57-61. */
-        if(result == MESH_OK && decoded.data.portnum == MESH_PORTNUM_NODEINFO_APP) {
+        if(result == MESH_OK && app->rx_decoded.data.portnum == MESH_PORTNUM_NODEINFO_APP) {
             MeshUser user;
-            if(mesh_user_parse(decoded.data.payload, decoded.data.payload_len, &user)) {
-                node_roster_set_user(&app->roster, event.from, &user, furi_get_tick());
+            if(mesh_user_parse(
+                   app->rx_decoded.data.payload, app->rx_decoded.data.payload_len, &user)) {
+                node_roster_set_user(&app->roster, app->rx_event.from, &user, furi_get_tick());
             }
         }
 
         app->crc_errors = source_radio_crc_errors(app->source);
 
-        size_t copy = raw.len < RAW_FRAME_MAX ? raw.len : RAW_FRAME_MAX;
-        memcpy(app->last_raw, raw.data, copy);
+        size_t copy = app->rx_frame.len < RAW_FRAME_MAX ? app->rx_frame.len : RAW_FRAME_MAX;
+        memcpy(app->last_raw, app->rx_frame.data, copy);
         app->last_raw_len = copy;
 
         furi_mutex_release(app->mutex);
