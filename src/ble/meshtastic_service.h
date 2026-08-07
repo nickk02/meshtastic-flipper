@@ -42,6 +42,23 @@ bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* 
 /* Number of messages waiting. Exposed for the debug view. */
 size_t meshtastic_ble_service_pending(MeshtasticBleService* service);
 
+/* What the BLE side has actually done.
+ *
+ * Every step of this protocol is invisible from outside the device: a phone
+ * that says "communicating" tells us nothing about which messages arrived or
+ * what we answered. These counters are the difference between diagnosing and
+ * guessing. */
+typedef struct {
+    uint32_t writes; /* ToRadio writes received */
+    uint32_t last_nonce; /* want_config_id from the most recent write */
+    uint32_t queued; /* FromRadio messages queued, cumulative */
+    uint32_t drained; /* messages the drain timer has retired */
+    uint32_t pending; /* messages waiting now */
+    uint8_t stage; /* HandshakeStage */
+} MeshBleStats;
+
+void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out);
+
 /* True once a phone has completed both handshake stages. */
 bool meshtastic_ble_service_is_connected(MeshtasticBleService* service);
 
