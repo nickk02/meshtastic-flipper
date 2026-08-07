@@ -40,6 +40,15 @@ typedef struct {
     size_t len;
 } QueuedMessage;
 
+/* A ToRadio write, copied out of the BLE callback so the stack thread can
+ * return immediately. */
+typedef struct {
+    uint8_t data[QUEUE_MESSAGE_MAX];
+    size_t len;
+} PendingWrite;
+
+#define WRITE_QUEUE_DEPTH 4
+
 struct MeshtasticBleService {
     FuriHalBleProfileBase base;
 
@@ -61,6 +70,22 @@ struct MeshtasticBleService {
     uint32_t stat_last_nonce;
     uint32_t stat_queued;
     uint32_t stat_drained;
+    uint32_t stat_events;
+    uint32_t stat_vendor_events;
+    uint16_t stat_last_attr_handle;
+
+    /* ToRadio writes arrive on the BLE stack's thread. They are copied here
+     * and handled on a thread of our own.
+     *
+     * The Meshtastic firmware warns about exactly this: "CAUTION: This
+     * callback runs in the NimBLE task!!! Don't do anything except communicate
+     * with the main task's runOnce." Calling ble_gatt_characteristic_update
+     * from inside a GATT event handler re-enters the stack from its own
+     * callback, which locks the device up.
+     */
+    FuriMessageQueue* write_queue;
+    FuriThread* worker;
+    volatile bool worker_running;
 
     Handshake handshake;
     PhoneIdentity identity;
@@ -279,7 +304,6 @@ void meshtastic_ble_service_set_callback(
 static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, size_t len) {
     uint32_t nonce = 0;
 
-    service->stat_writes++;
     if(phone_decode_want_config_id(data, len, &nonce)) service->stat_last_nonce = nonce;
 
     /* service->reply is guarded by the same mutex as the queue. Writes only
@@ -337,23 +361,50 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
 
     if(service == NULL || event == NULL) return BleEventNotAck;
 
+    service->stat_events++;
+
     MeshHciEventPacket* packet = (MeshHciEventPacket*)(((MeshHciUartPacket*)event)->data);
 
     /* HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE, 0xFF. This one is in the SDK, at
      * lib/stm32wb_copro/wpan/ble/core/ble_std.h:62. */
     if(packet->evt != HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE) return BleEventNotAck;
 
+    service->stat_vendor_events++;
+
     MeshBlecoreEvent* blecore = (MeshBlecoreEvent*)packet->data;
     aci_gatt_attribute_modified_event_rp0* modified =
         (aci_gatt_attribute_modified_event_rp0*)blecore->data;
+    service->stat_last_attr_handle = modified->Attr_Handle;
 
     /* The value handle is one past the declaration handle, and the descriptor
      * is two past. The firmware's serial service does the same arithmetic at
      * serial_service.c:82-90. */
     if(modified->Attr_Handle != service->to_radio.handle + 1) return BleEventNotAck;
 
-    handle_to_radio(service, modified->Attr_Data, modified->Attr_Data_Length);
+    /* Copy and post. Nothing here may call back into the BLE stack. */
+    PendingWrite write;
+    size_t len = modified->Attr_Data_Length;
+    if(len > QUEUE_MESSAGE_MAX) len = QUEUE_MESSAGE_MAX;
+    memcpy(write.data, modified->Attr_Data, len);
+    write.len = len;
+
+    service->stat_writes++;
+    furi_message_queue_put(service->write_queue, &write, 0);
+
     return BleEventAckFlowEnable;
+}
+
+/* Runs the handshake and touches the BLE stack, on a thread of our own. */
+static int32_t ble_worker(void* context) {
+    MeshtasticBleService* service = context;
+    PendingWrite write;
+
+    while(service->worker_running) {
+        if(furi_message_queue_get(service->write_queue, &write, 100) != FuriStatusOk) continue;
+        if(!service->worker_running) break;
+        handle_to_radio(service, write.data, write.len);
+    }
+    return 0;
 }
 
 MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity) {
@@ -380,6 +431,10 @@ MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity
     ble_gatt_characteristic_init(service->svc_handle, &from_num_params, &service->from_num);
 
     service->drain_timer = furi_timer_alloc(drain_timer_callback, FuriTimerTypePeriodic, service);
+    service->write_queue = furi_message_queue_alloc(WRITE_QUEUE_DEPTH, sizeof(PendingWrite));
+    service->worker_running = true;
+    service->worker = furi_thread_alloc_ex("MeshBle", 2048, ble_worker, service);
+    furi_thread_start(service->worker);
     service->event_handler =
         ble_event_dispatcher_register_svc_handler(gatt_event_handler, service);
 
@@ -391,6 +446,12 @@ MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity
 void meshtastic_ble_service_free(MeshtasticBleService* service) {
     if(service == NULL) return;
 
+    if(service->worker) {
+        service->worker_running = false;
+        furi_thread_join(service->worker);
+        furi_thread_free(service->worker);
+    }
+    if(service->write_queue) furi_message_queue_free(service->write_queue);
     if(service->drain_timer) {
         furi_timer_stop(service->drain_timer);
         furi_timer_free(service->drain_timer);
@@ -420,5 +481,9 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
     out->drained = service->stat_drained;
     out->pending = (uint32_t)service->pending;
     out->stage = (uint8_t)handshake_stage(&service->handshake);
+    out->events = service->stat_events;
+    out->vendor_events = service->stat_vendor_events;
+    out->last_attr_handle = service->stat_last_attr_handle;
+    out->to_radio_handle = (uint16_t)(service->to_radio.handle + 1);
     furi_mutex_release(service->mutex);
 }
