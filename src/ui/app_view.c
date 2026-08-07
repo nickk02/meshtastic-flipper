@@ -16,6 +16,8 @@
  * Drawing only. No protocol logic. */
 #include "src/ui/app_view.h"
 
+#include "src/ble/meshtastic_service.h"
+
 #include <furi_hal_power.h>
 #include <datetime/datetime.h>
 #include <furi_hal_rtc.h>
@@ -41,6 +43,8 @@ static const char* page_title(AppPage page) {
         return "Signal";
     case PageLora:
         return "LoRa";
+    case PagePhone:
+        return "Phone";
     case PageCount:
     default:
         return "";
@@ -286,6 +290,44 @@ static void draw_lora(Canvas* canvas, MeshApp* app) {
     canvas_draw_str_aligned(canvas, SCREEN_W / 2, 62, AlignCenter, AlignBottom, line);
 }
 
+/* Everything the BLE side has actually done. A phone that says "communicating"
+ * says nothing about which messages arrived, so this is what turns guessing
+ * into diagnosis. */
+static void draw_phone(Canvas* canvas, MeshApp* app) {
+    char line[36];
+    MeshBleStats st;
+
+    if(app->ble == NULL) {
+        canvas_draw_str(canvas, 2, BODY_TOP, "BLE not started");
+        canvas_draw_str(
+            canvas, 2, BODY_TOP + ROW_H, meshtastic_ble_state_name(meshtastic_ble_state()));
+        return;
+    }
+
+    meshtastic_ble_service_stats(app->ble, &st);
+
+    static const char* const stage_name[] = {"idle", "cfg", "nodes", "done"};
+    const char* stage = st.stage < 4 ? stage_name[st.stage] : "?";
+
+    snprintf(line, sizeof(line), "Writes:%lu  Stage:%s", (unsigned long)st.writes, stage);
+    canvas_draw_str(canvas, 2, BODY_TOP, line);
+
+    snprintf(line, sizeof(line), "Nonce: %lu", (unsigned long)st.last_nonce);
+    canvas_draw_str(canvas, 2, BODY_TOP + ROW_H, line);
+
+    snprintf(
+        line,
+        sizeof(line),
+        "Q:%lu Drained:%lu Now:%lu",
+        (unsigned long)st.queued,
+        (unsigned long)st.drained,
+        (unsigned long)st.pending);
+    canvas_draw_str(canvas, 2, BODY_TOP + 2 * ROW_H, line);
+
+    snprintf(line, sizeof(line), "Adv: %s", meshtastic_ble_state_name(meshtastic_ble_state()));
+    canvas_draw_str(canvas, 2, BODY_TOP + 3 * ROW_H, line);
+}
+
 void app_view_draw(Canvas* canvas, void* context) {
     MeshApp* app = context;
 
@@ -312,6 +354,9 @@ void app_view_draw(Canvas* canvas, void* context) {
     case PageLora:
         draw_lora(canvas, app);
         break;
+    case PagePhone:
+        draw_phone(canvas, app);
+        break;
     case PageCount:
     default:
         break;
@@ -334,6 +379,7 @@ size_t app_view_row_count(MeshApp* app) {
         break;
     case PageHome:
     case PageLora:
+    case PagePhone:
     case PageCount:
     default:
         rows = 0;

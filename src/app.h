@@ -26,6 +26,7 @@ typedef enum {
     PageNodesHeard,
     PageNodesSignal,
     PageLora,
+    PagePhone,
     PageCount,
 } AppPage;
 

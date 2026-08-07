@@ -57,6 +57,11 @@ struct MeshtasticBleService {
     /* Walks the queue, since reads are invisible to us. */
     FuriTimer* drain_timer;
 
+    uint32_t stat_writes;
+    uint32_t stat_last_nonce;
+    uint32_t stat_queued;
+    uint32_t stat_drained;
+
     Handshake handshake;
     PhoneIdentity identity;
 
@@ -209,6 +214,7 @@ static void drain_timer_callback(void* context) {
     if(service->pending > 0) {
         service->tail = (service->tail + 1) % QUEUE_DEPTH;
         service->pending--;
+        service->stat_drained++;
     }
     more = service->pending > 0;
     furi_mutex_release(service->mutex);
@@ -234,6 +240,7 @@ bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* 
     slot->len = len;
     service->head = (service->head + 1) % QUEUE_DEPTH;
     service->pending++;
+    service->stat_queued++;
 
     furi_mutex_release(service->mutex);
 
@@ -270,6 +277,11 @@ void meshtastic_ble_service_set_callback(
 /* Called when the phone writes ToRadio. Runs the handshake and queues whatever
  * it produces. */
 static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, size_t len) {
+    uint32_t nonce = 0;
+
+    service->stat_writes++;
+    if(phone_decode_want_config_id(data, len, &nonce)) service->stat_last_nonce = nonce;
+
     /* service->reply is guarded by the same mutex as the queue. Writes only
      * ever arrive on the BLE thread, so contention is nil, but taking the lock
      * keeps the invariant simple. */
@@ -394,4 +406,19 @@ void meshtastic_ble_service_free(MeshtasticBleService* service) {
 
     furi_mutex_free(service->mutex);
     free(service);
+}
+
+void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out) {
+    if(out == NULL) return;
+    memset(out, 0, sizeof(*out));
+    if(service == NULL) return;
+
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    out->writes = service->stat_writes;
+    out->last_nonce = service->stat_last_nonce;
+    out->queued = service->stat_queued;
+    out->drained = service->stat_drained;
+    out->pending = (uint32_t)service->pending;
+    out->stage = (uint8_t)handshake_stage(&service->handshake);
+    furi_mutex_release(service->mutex);
 }
