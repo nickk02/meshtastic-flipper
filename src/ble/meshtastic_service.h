@@ -55,6 +55,14 @@ typedef struct {
     uint32_t drained; /* messages the drain timer has retired */
     uint32_t pending; /* messages waiting now */
     uint8_t stage; /* HandshakeStage */
+
+    /* Every GATT event reaching our handler, and every vendor event among
+     * them. If events is 0 the dispatcher is not calling us at all, which is a
+     * different problem from being called and rejecting the event. */
+    uint32_t events;
+    uint32_t vendor_events;
+    uint16_t last_attr_handle; /* handle from the last attribute-modified event */
+    uint16_t to_radio_handle; /* the handle we compare against */
 } MeshBleStats;
 
 void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out);

@@ -324,7 +324,17 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
         (unsigned long)st.pending);
     canvas_draw_str(canvas, 2, BODY_TOP + 2 * ROW_H, line);
 
-    snprintf(line, sizeof(line), "Adv: %s", meshtastic_ble_state_name(meshtastic_ble_state()));
+    /* Ev counts every GATT event reaching our handler; V counts the vendor
+     * events among them. H is the attribute handle of the last one, against
+     * the handle we expect. Zero events means the dispatcher never calls us. */
+    snprintf(
+        line,
+        sizeof(line),
+        "Ev:%lu V:%lu H:%u/%u",
+        (unsigned long)st.events,
+        (unsigned long)st.vendor_events,
+        (unsigned)st.last_attr_handle,
+        (unsigned)st.to_radio_handle);
     canvas_draw_str(canvas, 2, BODY_TOP + 3 * ROW_H, line);
 }
 
