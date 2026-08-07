@@ -114,18 +114,20 @@ static void profile_get_gap_config(GapConfig* config, FuriHalBleProfileParams pa
      * including that byte is handed to aci_gap_set_discoverable as the local
      * name AD structure. furi_hal_version.c:105 sets it the same way.
      *
-     * Second, the packet is 31 bytes. The stack spends 3 on flags, and a
-     * 128-bit service UUID costs 18 more. That leaves 10 for the name field,
-     * of which 2 are its length and type bytes, so the name itself can be at
-     * most 8 characters. A longer one overflows and the stack drops a field.
-     * If the field it drops is the service UUID, the Meshtastic app never
-     * matches its scan filter and the device simply never appears. */
+     * Second, the service UUID must survive into the advertisement, and the
+     * packet is only 31 bytes. Flags cost 3 and a 128-bit UUID costs 18,
+     * leaving 10. An 8 character name fills that exactly, with no margin: if
+     * the stack adds a single byte of its own the packet overflows and a field
+     * is dropped. When the dropped field is the UUID, the device becomes
+     * undiscoverable, because the client scans with a service UUID filter
+     * (BleRadioTransport.kt:295) and on Apple that is the only filter
+     * available.
+     *
+     * A four character name totals 27 bytes and leaves four spare. The name is
+     * worth less than being visible: the app replaces it with the node's real
+     * name from NodeInfo as soon as it connects. */
     config->adv_name[0] = AD_TYPE_COMPLETE_LOCAL_NAME;
-    snprintf(
-        config->adv_name + 1,
-        sizeof(config->adv_name) - 1,
-        "Mesh%04lx",
-        (unsigned long)(pending_identity.node_num & 0xFFFF));
+    snprintf(config->adv_name + 1, sizeof(config->adv_name) - 1, "Mesh");
 
     config->conn_param.conn_int_min = 0x18; /* 30 ms */
     config->conn_param.conn_int_max = 0x24; /* 45 ms */
