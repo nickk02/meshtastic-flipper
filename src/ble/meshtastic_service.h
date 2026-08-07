@@ -52,9 +52,15 @@ typedef struct {
     uint32_t writes; /* ToRadio writes received */
     uint32_t last_nonce; /* want_config_id from the most recent write */
     uint32_t queued; /* FromRadio messages queued, cumulative */
-    uint32_t drained; /* messages the drain timer has retired */
+    uint32_t drained; /* messages the drain step has retired */
     uint32_t pending; /* messages waiting now */
     uint8_t stage; /* HandshakeStage */
+
+    /* Attempted publishes, and how many of them the stack refused. A rising
+     * publish count with a flat drained count means the worker is alive and the
+     * queue is not moving. A rising failure count means the opposite problem. */
+    uint32_t publishes;
+    uint32_t publish_fail;
 
     /* Every GATT event reaching our handler, and every vendor event among
      * them. If events is 0 the dispatcher is not calling us at all, which is a

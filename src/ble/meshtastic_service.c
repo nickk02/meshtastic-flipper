@@ -63,13 +63,18 @@ struct MeshtasticBleService {
     size_t tail;
     size_t pending;
 
-    /* Walks the queue, since reads are invisible to us. */
-    FuriTimer* drain_timer;
+    /* Pacing for the queue walk, since reads are invisible to us. Both fields
+     * belong to the worker thread. There is deliberately no FuriTimer here: see
+     * drain_step. */
+    bool drain_active;
+    uint32_t drain_due_tick;
 
     uint32_t stat_writes;
     uint32_t stat_last_nonce;
     uint32_t stat_queued;
     uint32_t stat_drained;
+    uint32_t stat_publishes;
+    uint32_t stat_publish_fail;
     uint32_t stat_events;
     uint32_t stat_vendor_events;
     uint16_t stat_last_attr_handle;
@@ -86,6 +91,11 @@ struct MeshtasticBleService {
     FuriMessageQueue* write_queue;
     FuriThread* worker;
     volatile bool worker_running;
+
+    /* Staging for one inbound write. Owned here for the same reason as reply
+     * below: the event handler runs on the BLE stack's thread and this struct
+     * is 260 bytes, too much to put on a stack we do not size. */
+    PendingWrite inbound;
 
     Handshake handshake;
     PhoneIdentity identity;
@@ -222,31 +232,48 @@ static const BleGattCharacteristicParams from_num_params = {
     .is_variable = CHAR_VALUE_LEN_CONSTANT,
 };
 
-/* Publishes the current head as the FromRadio value and rings the doorbell. */
+/* Publishes the current head as the FromRadio value and rings the doorbell.
+ *
+ * Both results are counted. Without that, a stalled queue cannot be told apart
+ * from a queue that is being published to a stack that rejects every write,
+ * and the two need opposite fixes. */
 static void publish_head(MeshtasticBleService* service) {
-    ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service);
-    ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service);
+    bool ok = ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service);
+    ok = ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service) && ok;
+
+    service->stat_publishes++;
+    if(!ok) service->stat_publish_fail++;
 }
 
-/* Drops the message the phone has most likely read by now and publishes the
- * next. This is the part that would be a read callback on any platform that
- * exposes one. */
-static void drain_timer_callback(void* context) {
-    MeshtasticBleService* service = context;
-    bool more;
+/* Publishes the head, then advances past it so the next step carries the next
+ * message. This is the part that would be a read callback on any platform that
+ * exposes one.
+ *
+ * Runs on our own worker thread, and it has to. This was a FuriTimer callback,
+ * which was wrong twice over. Timer callbacks run on the shared FreeRTOS timer
+ * service task, so acquiring a mutex with FuriWaitForever there stalls every
+ * timer in the system, and calling into the BLE stack there deadlocks against
+ * the stack's own timers. That froze the device. It also meant the blocking
+ * update never returned, which is why the queue never advanced.
+ *
+ * The order matters: publish before advancing. Advancing first would skip the
+ * first message. */
+static void drain_step(MeshtasticBleService* service) {
+    bool had_message;
+
+    publish_head(service);
 
     furi_mutex_acquire(service->mutex, FuriWaitForever);
-    if(service->pending > 0) {
+    had_message = service->pending > 0;
+    if(had_message) {
         service->tail = (service->tail + 1) % QUEUE_DEPTH;
         service->pending--;
         service->stat_drained++;
     }
-    more = service->pending > 0;
+    /* Run one step past empty so the drained queue is published as a
+     * zero-length read. That empty read is how the phone learns to stop. */
+    service->drain_active = had_message || service->pending > 0;
     furi_mutex_release(service->mutex);
-
-    publish_head(service);
-
-    if(!more) furi_timer_stop(service->drain_timer);
 }
 
 bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* data, size_t len) {
@@ -267,14 +294,13 @@ bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* 
     service->pending++;
     service->stat_queued++;
 
+    /* Arm the worker and let it do every publish. Nothing on this path may
+     * touch the BLE stack: queue() is reached from handle_to_radio, and this
+     * function must stay callable from the radio thread too. */
+    service->drain_active = true;
+    service->drain_due_tick = furi_get_tick();
+
     furi_mutex_release(service->mutex);
-
-    publish_head(service);
-
-    /* 150ms between advances. The client's own re-poll delay is 200ms
-     * (BleRadioTransport.kt:77), so this stays ahead of it without racing so
-     * far ahead that a message is skipped. */
-    furi_timer_start(service->drain_timer, furi_ms_to_ticks(150));
     return true;
 }
 
@@ -381,28 +407,49 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
      * serial_service.c:82-90. */
     if(modified->Attr_Handle != service->to_radio.handle + 1) return BleEventNotAck;
 
-    /* Copy and post. Nothing here may call back into the BLE stack. */
-    PendingWrite write;
+    /* Copy and post. Nothing here may call back into the BLE stack, and
+     * nothing here may be large: this is the stack thread's stack. */
     size_t len = modified->Attr_Data_Length;
     if(len > QUEUE_MESSAGE_MAX) len = QUEUE_MESSAGE_MAX;
-    memcpy(write.data, modified->Attr_Data, len);
-    write.len = len;
+    memcpy(service->inbound.data, modified->Attr_Data, len);
+    service->inbound.len = len;
 
     service->stat_writes++;
-    furi_message_queue_put(service->write_queue, &write, 0);
+    furi_message_queue_put(service->write_queue, &service->inbound, 0);
 
     return BleEventAckFlowEnable;
 }
 
-/* Runs the handshake and touches the BLE stack, on a thread of our own. */
+/* 150ms per drain step. The client re-polls every 200ms
+ * (BleRadioTransport.kt:77), so this stays ahead of it without running so far
+ * ahead that a message is skipped. */
+#define DRAIN_INTERVAL_MS 150
+
+/* Wake often enough to hold that interval, but not so often that an idle
+ * connection spins. */
+#define WORKER_POLL_MS 25
+
+/* The one thread allowed to touch the BLE stack for us. It handles inbound
+ * writes and paces the outbound queue. Both jobs live here so that no callback
+ * context, ours or the stack's, ever calls into the stack. */
 static int32_t ble_worker(void* context) {
     MeshtasticBleService* service = context;
     PendingWrite write;
 
     while(service->worker_running) {
-        if(furi_message_queue_get(service->write_queue, &write, 100) != FuriStatusOk) continue;
+        if(furi_message_queue_get(service->write_queue, &write, WORKER_POLL_MS) == FuriStatusOk) {
+            if(!service->worker_running) break;
+            handle_to_radio(service, write.data, write.len);
+        }
         if(!service->worker_running) break;
-        handle_to_radio(service, write.data, write.len);
+
+        bool due;
+        furi_mutex_acquire(service->mutex, FuriWaitForever);
+        due = service->drain_active && (int32_t)(furi_get_tick() - service->drain_due_tick) >= 0;
+        if(due) service->drain_due_tick = furi_get_tick() + furi_ms_to_ticks(DRAIN_INTERVAL_MS);
+        furi_mutex_release(service->mutex);
+
+        if(due) drain_step(service);
     }
     return 0;
 }
@@ -430,10 +477,11 @@ MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity
     ble_gatt_characteristic_init(service->svc_handle, &from_radio_params, &service->from_radio);
     ble_gatt_characteristic_init(service->svc_handle, &from_num_params, &service->from_num);
 
-    service->drain_timer = furi_timer_alloc(drain_timer_callback, FuriTimerTypePeriodic, service);
     service->write_queue = furi_message_queue_alloc(WRITE_QUEUE_DEPTH, sizeof(PendingWrite));
     service->worker_running = true;
-    service->worker = furi_thread_alloc_ex("MeshBle", 2048, ble_worker, service);
+    /* This thread calls into the BLE stack and runs the handshake, so it needs
+     * more than the default. 2048 was sized before it did either. */
+    service->worker = furi_thread_alloc_ex("MeshBle", 4096, ble_worker, service);
     furi_thread_start(service->worker);
     service->event_handler =
         ble_event_dispatcher_register_svc_handler(gatt_event_handler, service);
@@ -452,10 +500,6 @@ void meshtastic_ble_service_free(MeshtasticBleService* service) {
         furi_thread_free(service->worker);
     }
     if(service->write_queue) furi_message_queue_free(service->write_queue);
-    if(service->drain_timer) {
-        furi_timer_stop(service->drain_timer);
-        furi_timer_free(service->drain_timer);
-    }
     if(service->event_handler) ble_event_dispatcher_unregister_svc_handler(service->event_handler);
 
     ble_gatt_characteristic_delete(service->svc_handle, &service->to_radio);
@@ -481,6 +525,8 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
     out->drained = service->stat_drained;
     out->pending = (uint32_t)service->pending;
     out->stage = (uint8_t)handshake_stage(&service->handshake);
+    out->publishes = service->stat_publishes;
+    out->publish_fail = service->stat_publish_fail;
     out->events = service->stat_events;
     out->vendor_events = service->stat_vendor_events;
     out->last_attr_handle = service->stat_last_attr_handle;
