@@ -23,6 +23,19 @@ extern const FuriHalBleProfileTemplate* ble_profile_meshtastic;
 
 typedef struct MeshtasticBleService MeshtasticBleService;
 
+/* Why BLE is or is not running. Shown in the UI, because every failure here is
+ * otherwise silent: the profile can start successfully and still never
+ * advertise. */
+typedef enum {
+    MeshBleIdle,
+    MeshBleAdvertising,
+    MeshBleUnsupported, /* core2 not alive, or GATT/GAP unavailable */
+    MeshBleProfileFailed, /* bt_profile_start returned NULL */
+} MeshBleState;
+
+MeshBleState meshtastic_ble_state(void);
+const char* meshtastic_ble_state_name(MeshBleState state);
+
 /* Bring the profile up. Returns NULL if Bluetooth is unavailable or the
  * profile fails to start, in which case the caller should carry on without
  * phone support rather than failing outright. */

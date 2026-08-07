@@ -120,7 +120,12 @@ static void draw_home(Canvas* canvas, MeshApp* app) {
     /* Row 3: frames received. A real device draws a channel utilization bar
      * here. That needs airtime accounting we do not have, and inventing a
      * percentage would be worse than showing a real count. */
-    snprintf(line, sizeof(line), "Rx: %lu", (unsigned long)app->total_frames);
+    snprintf(
+        line,
+        sizeof(line),
+        "Rx: %lu  BLE: %s",
+        (unsigned long)app->total_frames,
+        meshtastic_ble_state_name(meshtastic_ble_state()));
     canvas_draw_str(canvas, 2, BODY_TOP + 2 * ROW_H, line);
 
     /* Our own name, centred, as drawDeviceFocused does. */
@@ -254,8 +259,11 @@ static void draw_lora(Canvas* canvas, MeshApp* app) {
     snprintf(line, sizeof(line), "BLE: %s", app->ble_id);
     canvas_draw_str_aligned(canvas, SCREEN_W / 2, BODY_TOP, AlignCenter, AlignBottom, line);
 
+    /* Every BLE failure mode here is otherwise silent, so the state goes on
+     * screen rather than only into the log. */
+    snprintf(line, sizeof(line), "Adv: %s", meshtastic_ble_state_name(meshtastic_ble_state()));
     canvas_draw_str_aligned(
-        canvas, SCREEN_W / 2, BODY_TOP + ROW_H, AlignCenter, AlignBottom, "Role: CLIENT");
+        canvas, SCREEN_W / 2, BODY_TOP + ROW_H, AlignCenter, AlignBottom, line);
 
     snprintf(
         line,
