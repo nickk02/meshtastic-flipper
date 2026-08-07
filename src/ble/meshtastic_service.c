@@ -172,15 +172,26 @@ static bool to_radio_data(const void* context, const uint8_t** data, uint16_t* d
 static bool from_radio_data(const void* context, const uint8_t** data, uint16_t* data_len) {
     MeshtasticBleService* service = (MeshtasticBleService*)context;
 
-    if(service == NULL) {
-        *data_len = 0;
-        if(data) *data = NULL;
+    /* The length probe is answered first, and must not consult the context.
+     *
+     * ble_gatt_characteristic_init calls this with data == NULL to learn the
+     * value length, and passes the params' stored context, which is NULL here
+     * because these params are const and shared. Checking the context first
+     * meant the probe took the NULL branch and reported 0. That 0 became
+     * Char_Value_Length in aci_gatt_add_char, so FromRadio was registered as a
+     * characteristic that can hold nothing at all.
+     *
+     * The characteristic still appeared, with a valid handle, and the phone
+     * could still read it. It just always read empty, and every update carrying
+     * real data was refused. */
+    if(data == NULL) {
+        *data_len = QUEUE_MESSAGE_MAX;
         return false;
     }
 
-    if(data == NULL) {
-        /* Length probe at creation time. */
-        *data_len = QUEUE_MESSAGE_MAX;
+    if(service == NULL) {
+        *data_len = 0;
+        *data = NULL;
         return false;
     }
 
@@ -206,15 +217,24 @@ static bool from_num_data(const void* context, const uint8_t** data, uint16_t* d
     MeshtasticBleService* service = (MeshtasticBleService*)context;
 
     /* FromNum is a doorbell. Its value only has to change to wake the phone,
-     * which then reads FromRadio until empty. */
+     * which then reads FromRadio until empty.
+     *
+     * The length is answered without consulting the context, so the probe at
+     * creation time gets the right number. This one was already correct, but
+     * only because sizeof does not evaluate its operand, so the NULL context
+     * was harmless. The probe branch is now written out rather than left to
+     * that detail, which is what FromRadio got wrong. */
     *data_len = sizeof(service->from_num_value);
+
+    if(data == NULL) return false;
+
     if(service == NULL) {
-        if(data) *data = NULL;
+        *data = NULL;
         return false;
     }
 
     service->from_num_value = (uint32_t)service->pending;
-    if(data) *data = (const uint8_t*)&service->from_num_value;
+    *data = (const uint8_t*)&service->from_num_value;
     return false;
 }
 
@@ -259,15 +279,27 @@ static const BleGattCharacteristicParams from_num_params = {
 
 /* Publishes the current head as the FromRadio value and rings the doorbell.
  *
- * The two results are counted separately. A single combined counter said only
- * that one of them failed, which was not enough to act on: FromRadio failing
- * means the phone gets no data at all, while FromNum failing only costs the
- * doorbell, and the phone polls regardless. Those are different problems. */
+ * Note the sense of the test. ble_gatt_characteristic_update ends with
+ *
+ *     return result != BLE_STATUS_SUCCESS;
+ *
+ * so a true return means the update FAILED. A bool named nothing in particular,
+ * returned from a function called "update", reads as success, and I wrote these
+ * counters that way. They shipped inverted and reported every success as a
+ * failure. Do not simplify this to !update(...).
+ *
+ * ble_gatt_service_add, in the same file, returns the opposite:
+ * "return result == BLE_STATUS_SUCCESS;". The two cannot be assumed to match.
+ * Source: targets/f7/ble_glue/furi_ble/gatt.c.
+ *
+ * The two failures are counted separately because they mean different things.
+ * FromRadio failing costs the phone all of its data. FromNum failing costs only
+ * the doorbell, and the phone polls regardless. */
 static void publish_head(MeshtasticBleService* service) {
-    if(!ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service)) {
+    if(ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service)) {
         service->stat_fail_radio++;
     }
-    if(!ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service)) {
+    if(ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service)) {
         service->stat_fail_num++;
     }
     service->stat_publishes++;
