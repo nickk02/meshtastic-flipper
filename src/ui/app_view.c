@@ -309,16 +309,25 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
     static const char* const stage_name[] = {"idle", "cfg", "nodes", "done"};
     const char* stage = st.stage < 4 ? stage_name[st.stage] : "?";
 
-    snprintf(line, sizeof(line), "Writes:%lu  Stage:%s", (unsigned long)st.writes, stage);
+    /* W is ToRadio writes in. Pub is publishes attempted by the worker, Er the
+     * ones the stack refused. Pub climbing on its own proves the worker thread
+     * is running, which is the thing that was silently false before. */
+    snprintf(
+        line,
+        sizeof(line),
+        "W:%lu Pub:%lu Er:%lu",
+        (unsigned long)st.writes,
+        (unsigned long)st.publishes,
+        (unsigned long)st.publish_fail);
     canvas_draw_str(canvas, 2, BODY_TOP, line);
 
-    snprintf(line, sizeof(line), "Nonce: %lu", (unsigned long)st.last_nonce);
+    snprintf(line, sizeof(line), "Stage:%s N:%lu", stage, (unsigned long)st.last_nonce);
     canvas_draw_str(canvas, 2, BODY_TOP + ROW_H, line);
 
     snprintf(
         line,
         sizeof(line),
-        "Q:%lu Drained:%lu Now:%lu",
+        "Q:%lu Dr:%lu Now:%lu",
         (unsigned long)st.queued,
         (unsigned long)st.drained,
         (unsigned long)st.pending);
