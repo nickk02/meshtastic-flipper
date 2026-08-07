@@ -4,6 +4,7 @@
 #include <furi_ble/event_dispatcher.h>
 #include <furi_ble/gatt.h>
 #include <ble/core/ble_std.h>
+#include <furi_hal_bt.h>
 #include <furi_hal_version.h>
 #include <string.h>
 
@@ -39,6 +40,25 @@ typedef struct {
 
 static PhoneIdentity pending_identity;
 static bool pending_identity_set = false;
+static MeshBleState ble_state = MeshBleIdle;
+
+MeshBleState meshtastic_ble_state(void) {
+    return ble_state;
+}
+
+const char* meshtastic_ble_state_name(MeshBleState state) {
+    switch(state) {
+    case MeshBleIdle:
+        return "idle";
+    case MeshBleAdvertising:
+        return "advertising";
+    case MeshBleUnsupported:
+        return "unsupported";
+    case MeshBleProfileFailed:
+        return "failed";
+    }
+    return "unknown";
+}
 
 static FuriHalBleProfileBase* profile_start(FuriHalBleProfileParams params) {
     UNUSED(params);
@@ -127,18 +147,41 @@ MeshtasticBleService* meshtastic_ble_start(const PhoneIdentity* identity) {
         pending_identity_set = true;
     }
 
+    /* The Bt service skips this whole path when the second core is not alive
+     * or GATT/GAP is unavailable, and does so without reporting anything.
+     * bt.c:396. */
+    if(!furi_hal_bt_is_alive() || !furi_hal_bt_is_gatt_gap_supported()) {
+        FURI_LOG_E(
+            TAG,
+            "BLE unavailable: alive=%d gatt=%d",
+            (int)furi_hal_bt_is_alive(),
+            (int)furi_hal_bt_is_gatt_gap_supported());
+        ble_state = MeshBleUnsupported;
+        return NULL;
+    }
+
     Bt* bt = furi_record_open(RECORD_BT);
     FuriHalBleProfileBase* base = bt_profile_start(bt, ble_profile_meshtastic, NULL);
 
     if(base == NULL) {
         FURI_LOG_W(TAG, "could not start the Meshtastic BLE profile");
+        ble_state = MeshBleProfileFailed;
         furi_record_close(RECORD_BT);
         return NULL;
     }
 
     MeshtasticProfile* profile = (MeshtasticProfile*)base;
     furi_record_close(RECORD_BT);
-    FURI_LOG_I(TAG, "advertising as Flipper Mesh");
+
+    /* The Bt service only starts advertising when Bluetooth is enabled in
+     * Flipper settings (bt.c:411). With it switched off the profile starts
+     * cleanly and then sits silent, which is indistinguishable from a bug.
+     * The user launched an app whose whole purpose is a BLE connection, so
+     * advertise regardless and show the state on screen. */
+    furi_hal_bt_start_advertising();
+
+    ble_state = furi_hal_bt_is_active() ? MeshBleAdvertising : MeshBleProfileFailed;
+    FURI_LOG_I(TAG, "BLE %s", meshtastic_ble_state_name(ble_state));
     return profile->service;
 }
 
@@ -151,4 +194,5 @@ void meshtastic_ble_stop(MeshtasticBleService* service) {
     Bt* bt = furi_record_open(RECORD_BT);
     bt_profile_restore_default(bt);
     furi_record_close(RECORD_BT);
+    ble_state = MeshBleIdle;
 }
