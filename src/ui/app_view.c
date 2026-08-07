@@ -309,16 +309,17 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
     static const char* const stage_name[] = {"idle", "cfg", "nodes", "done"};
     const char* stage = st.stage < 4 ? stage_name[st.stage] : "?";
 
-    /* W is ToRadio writes in. Pub is publishes attempted by the worker, Er the
-     * ones the stack refused. Pub climbing on its own proves the worker thread
-     * is running, which is the thing that was silently false before. */
+    /* W is ToRadio writes in, Pub is publishes attempted. Fr and Fn are the
+     * refusals for FromRadio and FromNum, kept apart because only Fr costs the
+     * phone its data. */
     snprintf(
         line,
         sizeof(line),
-        "W:%lu Pub:%lu Er:%lu",
+        "W:%lu P:%lu Fr:%lu Fn:%lu",
         (unsigned long)st.writes,
         (unsigned long)st.publishes,
-        (unsigned long)st.publish_fail);
+        (unsigned long)st.fail_radio,
+        (unsigned long)st.fail_num);
     canvas_draw_str(canvas, 2, BODY_TOP, line);
 
     snprintf(line, sizeof(line), "Stage:%s N:%lu", stage, (unsigned long)st.last_nonce);
@@ -333,17 +334,18 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
         (unsigned long)st.pending);
     canvas_draw_str(canvas, 2, BODY_TOP + 2 * ROW_H, line);
 
-    /* Ev counts every GATT event reaching our handler; V counts the vendor
-     * events among them. H is the attribute handle of the last one, against
-     * the handle we expect. Zero events means the dispatcher never calls us. */
+    /* Handles the stack gave the three characteristics. A zero for R or N
+     * means that characteristic was never added, so the phone cannot see it and
+     * every update against it fails. Ev is GATT events reaching our handler; a
+     * zero there means the dispatcher never calls us at all. */
     snprintf(
         line,
         sizeof(line),
-        "Ev:%lu V:%lu H:%u/%u",
-        (unsigned long)st.events,
-        (unsigned long)st.vendor_events,
-        (unsigned)st.last_attr_handle,
-        (unsigned)st.to_radio_handle);
+        "T:%u R:%u N:%u Ev:%lu",
+        (unsigned)st.to_radio_handle,
+        (unsigned)st.from_radio_handle,
+        (unsigned)st.from_num_handle,
+        (unsigned long)st.events);
     canvas_draw_str(canvas, 2, BODY_TOP + 3 * ROW_H, line);
 }
 
