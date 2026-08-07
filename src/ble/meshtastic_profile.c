@@ -3,6 +3,7 @@
 #include <bt/bt_service/bt.h>
 #include <furi_ble/event_dispatcher.h>
 #include <furi_ble/gatt.h>
+#include <ble/core/ble_std.h>
 #include <furi_hal_version.h>
 #include <string.h>
 
@@ -84,9 +85,27 @@ static void profile_get_gap_config(GapConfig* config, FuriHalBleProfileParams pa
     memcpy(config->mac_address, furi_hal_version_get_ble_mac(), sizeof(config->mac_address));
     config->mac_address[0] ^= 0x0F;
 
-    /* The app shows whatever the device advertises, so the name should say
-     * what this actually is. */
-    snprintf(config->adv_name, sizeof(config->adv_name), "Flipper Mesh");
+    /* Two constraints decide the advertised name, and getting either wrong
+     * makes the device invisible to the phone app.
+     *
+     * First, adv_name[0] must be AD_TYPE_COMPLETE_LOCAL_NAME, not a
+     * character. gap.c:357 skips the first byte when registering the GAP name
+     * ("Skip fist symbol AD_TYPE_COMPLETE_LOCAL_NAME"), and the whole buffer
+     * including that byte is handed to aci_gap_set_discoverable as the local
+     * name AD structure. furi_hal_version.c:105 sets it the same way.
+     *
+     * Second, the packet is 31 bytes. The stack spends 3 on flags, and a
+     * 128-bit service UUID costs 18 more. That leaves 10 for the name field,
+     * of which 2 are its length and type bytes, so the name itself can be at
+     * most 8 characters. A longer one overflows and the stack drops a field.
+     * If the field it drops is the service UUID, the Meshtastic app never
+     * matches its scan filter and the device simply never appears. */
+    config->adv_name[0] = AD_TYPE_COMPLETE_LOCAL_NAME;
+    snprintf(
+        config->adv_name + 1,
+        sizeof(config->adv_name) - 1,
+        "Mesh%04lx",
+        (unsigned long)(pending_identity.node_num & 0xFFFF));
 
     config->conn_param.conn_int_min = 0x18; /* 30 ms */
     config->conn_param.conn_int_max = 0x24; /* 45 ms */
