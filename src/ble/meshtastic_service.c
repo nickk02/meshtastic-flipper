@@ -54,6 +54,9 @@ struct MeshtasticBleService {
     size_t tail;
     size_t pending;
 
+    /* Walks the queue, since reads are invisible to us. */
+    FuriTimer* drain_timer;
+
     Handshake handshake;
     PhoneIdentity identity;
 
@@ -87,8 +90,20 @@ static bool to_radio_data(const void* context, const uint8_t** data, uint16_t* d
     return false;
 }
 
-/* Serves the next queued message, or an empty read when the queue is drained.
- * An empty read is how the phone learns to stop reading. */
+/* Supplies whatever ble_gatt_characteristic_update should store as the
+ * characteristic's value.
+ *
+ * This is NOT a per-read callback. The Flipper exports no aci_gatt_* function
+ * to applications, including aci_gatt_allow_read, so an app cannot answer a
+ * read request individually. The phone's reads are served by the stack from
+ * the last value we stored.
+ *
+ * The Meshtastic protocol wants read-until-empty: each read returns the next
+ * packet. We cannot see reads, so instead a timer walks the queue and restates
+ * the value, notifying FromNum each time. Repeats are possible if the phone
+ * reads faster than the timer advances. The client guards against duplicate
+ * config_complete signals (MeshConfigFlowManagerImpl.kt:75), which is the
+ * reason this is worth trying at all. */
 static bool from_radio_data(const void* context, const uint8_t** data, uint16_t* data_len) {
     MeshtasticBleService* service = (MeshtasticBleService*)context;
 
@@ -106,6 +121,8 @@ static bool from_radio_data(const void* context, const uint8_t** data, uint16_t*
 
     furi_mutex_acquire(service->mutex, FuriWaitForever);
 
+    /* The head is restated, not consumed. Advancing happens in the timer, so
+     * the value stays readable for as long as the phone might read it. */
     if(service->pending == 0) {
         *data_len = 0;
         *data = service->read_scratch;
@@ -114,9 +131,6 @@ static bool from_radio_data(const void* context, const uint8_t** data, uint16_t*
         memcpy(service->read_scratch, msg->data, msg->len);
         *data_len = (uint16_t)msg->len;
         *data = service->read_scratch;
-
-        service->tail = (service->tail + 1) % QUEUE_DEPTH;
-        service->pending--;
     }
 
     furi_mutex_release(service->mutex);
@@ -161,7 +175,7 @@ static const BleGattCharacteristicParams from_radio_params = {
     .uuid_type = UUID_TYPE_128,
     .char_properties = CHAR_PROP_READ,
     .security_permissions = ATTR_PERMISSION_NONE,
-    .gatt_evt_mask = GATT_NOTIFY_READ_REQ_AND_WAIT_FOR_APPL_RESP,
+    .gatt_evt_mask = GATT_DONT_NOTIFY_EVENTS,
     .is_variable = CHAR_VALUE_LEN_VARIABLE,
 };
 
@@ -177,6 +191,32 @@ static const BleGattCharacteristicParams from_num_params = {
     .gatt_evt_mask = GATT_DONT_NOTIFY_EVENTS,
     .is_variable = CHAR_VALUE_LEN_CONSTANT,
 };
+
+/* Publishes the current head as the FromRadio value and rings the doorbell. */
+static void publish_head(MeshtasticBleService* service) {
+    ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service);
+    ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service);
+}
+
+/* Drops the message the phone has most likely read by now and publishes the
+ * next. This is the part that would be a read callback on any platform that
+ * exposes one. */
+static void drain_timer_callback(void* context) {
+    MeshtasticBleService* service = context;
+    bool more;
+
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    if(service->pending > 0) {
+        service->tail = (service->tail + 1) % QUEUE_DEPTH;
+        service->pending--;
+    }
+    more = service->pending > 0;
+    furi_mutex_release(service->mutex);
+
+    publish_head(service);
+
+    if(!more) furi_timer_stop(service->drain_timer);
+}
 
 bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* data, size_t len) {
     if(service == NULL || data == NULL) return false;
@@ -197,8 +237,12 @@ bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* 
 
     furi_mutex_release(service->mutex);
 
-    /* Ring the doorbell so the phone starts reading. */
-    ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service);
+    publish_head(service);
+
+    /* 150ms between advances. The client's own re-poll delay is 200ms
+     * (BleRadioTransport.kt:77), so this stays ahead of it without racing so
+     * far ahead that a message is skipped. */
+    furi_timer_start(service->drain_timer, furi_ms_to_ticks(150));
     return true;
 }
 
@@ -323,6 +367,7 @@ MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity
     ble_gatt_characteristic_init(service->svc_handle, &from_radio_params, &service->from_radio);
     ble_gatt_characteristic_init(service->svc_handle, &from_num_params, &service->from_num);
 
+    service->drain_timer = furi_timer_alloc(drain_timer_callback, FuriTimerTypePeriodic, service);
     service->event_handler =
         ble_event_dispatcher_register_svc_handler(gatt_event_handler, service);
 
@@ -334,6 +379,10 @@ MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity
 void meshtastic_ble_service_free(MeshtasticBleService* service) {
     if(service == NULL) return;
 
+    if(service->drain_timer) {
+        furi_timer_stop(service->drain_timer);
+        furi_timer_free(service->drain_timer);
+    }
     if(service->event_handler) ble_event_dispatcher_unregister_svc_handler(service->event_handler);
 
     ble_gatt_characteristic_delete(service->svc_handle, &service->to_radio);
