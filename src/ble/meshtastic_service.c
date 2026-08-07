@@ -32,8 +32,28 @@
  * absorb a burst without blocking the radio thread. Dropping beats blocking:
  * a missed frame costs one message, a blocked radio thread costs every
  * subsequent one. */
-#define QUEUE_DEPTH       8
-#define QUEUE_MESSAGE_MAX 256
+#define QUEUE_DEPTH 8
+
+/* Declared value length for FromRadio, and the largest message the queue will
+ * accept. The callback's length probe becomes Char_Value_Length in
+ * aci_gatt_add_char, per the comment in furi_ble/gatt.h, and the stack carves
+ * that out of a fixed ATT value array shared with every other service on the
+ * device. Asking for more than we use is not free.
+ *
+ * 192 is HANDSHAKE_MAX_MESSAGE. Nothing we send can exceed it, and the queue
+ * rejects anything larger so we never hold a message we cannot publish. */
+#define QUEUE_MESSAGE_MAX 192
+
+/* Declared value length for ToRadio. The phone's handshake writes are a few
+ * bytes; this is headroom, not a target. */
+#define TO_RADIO_VALUE_MAX 128
+
+/* If a handshake reply could ever exceed the declared FromRadio length, the
+ * queue would silently refuse it and the phone would wait forever for a message
+ * that was built correctly and then dropped. Catch that at compile time. */
+_Static_assert(
+    QUEUE_MESSAGE_MAX >= HANDSHAKE_MAX_MESSAGE,
+    "FromRadio value length must cover the largest handshake reply");
 
 typedef struct {
     uint8_t data[QUEUE_MESSAGE_MAX];
@@ -74,7 +94,8 @@ struct MeshtasticBleService {
     uint32_t stat_queued;
     uint32_t stat_drained;
     uint32_t stat_publishes;
-    uint32_t stat_publish_fail;
+    uint32_t stat_fail_radio;
+    uint32_t stat_fail_num;
     uint32_t stat_events;
     uint32_t stat_vendor_events;
     uint16_t stat_last_attr_handle;
@@ -113,6 +134,10 @@ struct MeshtasticBleService {
     uint32_t from_num_value;
     GapSvcEventHandler* event_handler;
 
+    /* Last stats read, kept so the draw callback has something to show when
+     * the lock is busy. Written only under the mutex. */
+    MeshBleStats snapshot;
+
     MeshtasticBleToRadioCallback callback;
     void* callback_context;
 };
@@ -125,7 +150,7 @@ static MeshtasticBleService* active_service = NULL;
 
 static bool to_radio_data(const void* context, const uint8_t** data, uint16_t* data_len) {
     UNUSED(context);
-    *data_len = QUEUE_MESSAGE_MAX;
+    *data_len = TO_RADIO_VALUE_MAX;
     if(data) *data = NULL;
     return false;
 }
@@ -234,15 +259,18 @@ static const BleGattCharacteristicParams from_num_params = {
 
 /* Publishes the current head as the FromRadio value and rings the doorbell.
  *
- * Both results are counted. Without that, a stalled queue cannot be told apart
- * from a queue that is being published to a stack that rejects every write,
- * and the two need opposite fixes. */
+ * The two results are counted separately. A single combined counter said only
+ * that one of them failed, which was not enough to act on: FromRadio failing
+ * means the phone gets no data at all, while FromNum failing only costs the
+ * doorbell, and the phone polls regardless. Those are different problems. */
 static void publish_head(MeshtasticBleService* service) {
-    bool ok = ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service);
-    ok = ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service) && ok;
-
+    if(!ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service)) {
+        service->stat_fail_radio++;
+    }
+    if(!ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service)) {
+        service->stat_fail_num++;
+    }
     service->stat_publishes++;
-    if(!ok) service->stat_publish_fail++;
 }
 
 /* Publishes the head, then advances past it so the next step carries the next
@@ -304,12 +332,12 @@ bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* 
     return true;
 }
 
+/* Non-blocking for the same reason as meshtastic_ble_service_stats: any UI
+ * caller runs on the GUI thread. size_t reads are atomic on this target, so the
+ * unlocked read is a stale value at worst, never a torn one. */
 size_t meshtastic_ble_service_pending(MeshtasticBleService* service) {
     if(service == NULL) return 0;
-    furi_mutex_acquire(service->mutex, FuriWaitForever);
-    size_t pending = service->pending;
-    furi_mutex_release(service->mutex);
-    return pending;
+    return service->pending;
 }
 
 bool meshtastic_ble_service_is_connected(MeshtasticBleService* service) {
@@ -513,23 +541,43 @@ void meshtastic_ble_service_free(MeshtasticBleService* service) {
     free(service);
 }
 
+/* Never blocks, and must not.
+ *
+ * This is called from the ViewPort draw callback. view_port.h marks that
+ * callback "@warning called from GUI thread", and the GUI thread is a shared
+ * system service rather than something this app owns. Waiting on this mutex
+ * there, while the BLE worker holds it and calls into the stack, freezes the
+ * whole UI and not just this app. That is what locked the device up on the
+ * Phone page.
+ *
+ * When the lock is busy the last snapshot is returned instead. One frame of
+ * stale counters is the right trade against stalling the system. */
 void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out) {
     if(out == NULL) return;
-    memset(out, 0, sizeof(*out));
-    if(service == NULL) return;
+    if(service == NULL) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
 
-    furi_mutex_acquire(service->mutex, FuriWaitForever);
-    out->writes = service->stat_writes;
-    out->last_nonce = service->stat_last_nonce;
-    out->queued = service->stat_queued;
-    out->drained = service->stat_drained;
-    out->pending = (uint32_t)service->pending;
-    out->stage = (uint8_t)handshake_stage(&service->handshake);
-    out->publishes = service->stat_publishes;
-    out->publish_fail = service->stat_publish_fail;
-    out->events = service->stat_events;
-    out->vendor_events = service->stat_vendor_events;
-    out->last_attr_handle = service->stat_last_attr_handle;
-    out->to_radio_handle = (uint16_t)(service->to_radio.handle + 1);
-    furi_mutex_release(service->mutex);
+    if(furi_mutex_acquire(service->mutex, 0) == FuriStatusOk) {
+        MeshBleStats* snap = &service->snapshot;
+        snap->writes = service->stat_writes;
+        snap->last_nonce = service->stat_last_nonce;
+        snap->queued = service->stat_queued;
+        snap->drained = service->stat_drained;
+        snap->pending = (uint32_t)service->pending;
+        snap->stage = (uint8_t)handshake_stage(&service->handshake);
+        snap->publishes = service->stat_publishes;
+        snap->fail_radio = service->stat_fail_radio;
+        snap->fail_num = service->stat_fail_num;
+        snap->events = service->stat_events;
+        snap->vendor_events = service->stat_vendor_events;
+        snap->last_attr_handle = service->stat_last_attr_handle;
+        snap->to_radio_handle = (uint16_t)(service->to_radio.handle + 1);
+        snap->from_radio_handle = service->from_radio.handle;
+        snap->from_num_handle = service->from_num.handle;
+        furi_mutex_release(service->mutex);
+    }
+
+    *out = service->snapshot;
 }

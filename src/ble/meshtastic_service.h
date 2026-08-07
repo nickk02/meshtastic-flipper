@@ -56,11 +56,13 @@ typedef struct {
     uint32_t pending; /* messages waiting now */
     uint8_t stage; /* HandshakeStage */
 
-    /* Attempted publishes, and how many of them the stack refused. A rising
-     * publish count with a flat drained count means the worker is alive and the
-     * queue is not moving. A rising failure count means the opposite problem. */
+    /* Attempted publishes, and the refusals split by characteristic. They are
+     * separate because they mean different things: a FromRadio failure means
+     * the phone gets no data at all, a FromNum failure costs only the doorbell,
+     * and the phone polls regardless. */
     uint32_t publishes;
-    uint32_t publish_fail;
+    uint32_t fail_radio;
+    uint32_t fail_num;
 
     /* Every GATT event reaching our handler, and every vendor event among
      * them. If events is 0 the dispatcher is not calling us at all, which is a
@@ -69,6 +71,14 @@ typedef struct {
     uint32_t vendor_events;
     uint16_t last_attr_handle; /* handle from the last attribute-modified event */
     uint16_t to_radio_handle; /* the handle we compare against */
+
+    /* Handles the stack assigned to the two outbound characteristics. Zero
+     * means aci_gatt_add_char never succeeded for it, so the phone cannot see
+     * that characteristic at all and every update against it will fail. That is
+     * a completely different fault from a characteristic that exists and
+     * rejects writes, and the two are indistinguishable without this. */
+    uint16_t from_radio_handle;
+    uint16_t from_num_handle;
 } MeshBleStats;
 
 void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out);
