@@ -77,13 +77,22 @@ jobs:
       - name: List what will be published
         run: ls -l release/
 
-      - name: Publish release
+      # Assets must be attached while the release is still a draft.
+      # This repository has immutable releases turned on, which refuses any
+      # asset upload after a release is published. The action publishes first
+      # and uploads second, so publishing directly produced a release with the
+      # right notes and no .fap files at all.
+      #
+      # Building the draft and publishing it as a second step is the order the
+      # API allows.
+      - name: Stage the release as a draft
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           files: release/*.fap
           generate_release_notes: true
           prerelease: true
+          draft: true
           body: |
             One `.fap` per firmware family. Install the one matching the
             firmware on your Flipper.
@@ -102,7 +111,24 @@ jobs:
             launch. That is the loader rejecting a mismatched API version, not
             the app crashing.
 
-            This project is receive-only and needs an external SX1262 module.
-            The Flipper's CC1101 cannot demodulate LoRa, so on a stock Flipper
-            the app runs against a simulated frame source and shows "(sim)" on
-            the Stats page.
+            Receiving mesh traffic needs an external SX1262 module. The
+            Flipper's own CC1101 cannot demodulate LoRa. Without that module
+            the app still runs, and the BLE side still works, but no packets
+            arrive and the radio state says so on screen.
+
+      # Fails loudly rather than publishing an empty release. A release with
+      # notes and no .fap is worse than no release, because it looks installable.
+      - name: Check the draft has all three builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          count=$(gh release view "$TAG" --json assets --jq '[.assets[].name | select(endswith(".fap"))] | length')
+          echo "attached .fap count: $count"
+          test "$count" -eq 3
+
+      - name: Publish the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: gh release edit "$TAG" --draft=false --prerelease
