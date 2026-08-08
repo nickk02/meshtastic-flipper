@@ -1,10 +1,22 @@
 /* FromRadio messages for the Meshtastic phone app.
  *
  * The app's connection handshake is two stages. Each stage ends when the
- * device sends config_complete_id with the nonce the app asked for. The app
- * does not require the config, module config, channel or metadata blocks that
- * real firmware sends: its own test suite completes Stage 1 from MyNodeInfo
- * plus config_complete alone. See docs/feasibility-full-node.md.
+ * device sends config_complete_id with the nonce the app asked for.
+ *
+ * An earlier version of this comment claimed the app needs nothing but
+ * MyNodeInfo and config_complete for stage 1, on the strength of the Android
+ * client's own test suite. That is true of the handshake and false of the
+ * result. A real phone completes the handshake and is then left holding a node
+ * with no name, because the node's User record only ever arrived in stage 2.
+ *
+ * The firmware's real stage 1, PhoneAPI.cpp getFromRadio(), is
+ *
+ *   my_info, deviceuiConfig, own node_info, metadata, 8 channels,
+ *   10 config variants, 13 module config variants, then config_complete
+ *
+ * What follows is a subset: my_info, own node_info, metadata, config_complete.
+ * Channels and config are still missing, and need their field numbers taken
+ * from channel.proto and config.proto before they can be written.
  *
  * Field numbers come from meshtastic/protobufs, mesh.proto. They are cited
  * next to each one because getting a field number wrong produces a message the
@@ -23,6 +35,8 @@
 #define FROMRADIO_FIELD_MY_INFO            3
 #define FROMRADIO_FIELD_NODE_INFO          4
 #define FROMRADIO_FIELD_CONFIG_COMPLETE_ID 7
+#define FROMRADIO_FIELD_CHANNEL            10
+#define FROMRADIO_FIELD_METADATA           13
 
 /* ToRadio field numbers. mesh.proto, message ToRadio. */
 #define TORADIO_FIELD_PACKET         1
@@ -76,6 +90,13 @@ size_t phone_encode_node_info(const PhoneIdentity* id, uint8_t* out, size_t out_
  * Uses the always variant, because a nonce of 0 must still appear on the wire.
  * An omitted field would leave the app waiting. */
 size_t phone_encode_config_complete(uint32_t nonce, uint8_t* out, size_t out_len);
+
+/* FromRadio { metadata { ... } }.
+ *
+ * The app reads firmware_version to decide whether the device is supported at
+ * all, so a node that never sends metadata is a node it cannot fully adopt.
+ * Field numbers from mesh.proto, message DeviceMetadata. */
+size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_t out_len);
 
 /* FromRadio { packet { ... } }, wrapping an already-built MeshPacket. */
 size_t phone_encode_packet(
