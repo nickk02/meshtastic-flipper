@@ -75,7 +75,12 @@ TEST(test_starts_idle) {
     ASSERT_TRUE(!handshake_is_complete(&h));
 }
 
-TEST(test_stage_one_returns_my_node_info_then_config_complete) {
+/* Stage 1 must carry this device's own NodeInfo, not just my_info.
+ *
+ * Sending the NodeInfo only in stage 2 still completed the handshake, and the
+ * phone was left showing a node with no name. The order mirrors the firmware's
+ * own state machine in PhoneAPI.cpp getFromRadio(). */
+TEST(test_stage_one_sends_my_info_node_info_metadata_then_complete) {
     Handshake h;
     PhoneIdentity id = identity();
     HandshakeReply reply;
@@ -86,15 +91,24 @@ TEST(test_stage_one_returns_my_node_info_then_config_complete) {
     size_t len = make_want_config(PHONE_NONCE_CONFIG, to_radio, sizeof(to_radio));
 
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 2);
+    ASSERT_EQ_INT(reply.count, 4);
 
-    /* First message carries my_info, field 3. */
+    /* my_info, field 3. */
     ASSERT_TRUE(reply.messages[0].len > 0);
     ASSERT_EQ_INT(reply.messages[0].data[0] >> 3, FROMRADIO_FIELD_MY_INFO);
 
-    /* Second carries config_complete_id, field 7, with the same nonce. */
+    /* This device's own NodeInfo, field 4. This is the one that carries the
+     * name, and the one that was missing. */
+    ASSERT_TRUE(reply.messages[1].len > 0);
+    ASSERT_EQ_INT(reply.messages[1].data[0] >> 3, FROMRADIO_FIELD_NODE_INFO);
+
+    /* metadata, field 13. The app reads firmware_version from it. */
+    ASSERT_TRUE(reply.messages[2].len > 0);
+    ASSERT_EQ_INT(reply.messages[2].data[0] >> 3, FROMRADIO_FIELD_METADATA);
+
+    /* config_complete_id, field 7, carrying the nonce that was asked for. */
     ASSERT_TRUE(has_varint_field(
-        reply.messages[1].data, reply.messages[1].len, FROMRADIO_FIELD_CONFIG_COMPLETE_ID, &value));
+        reply.messages[3].data, reply.messages[3].len, FROMRADIO_FIELD_CONFIG_COMPLETE_ID, &value));
     ASSERT_EQ_INT(value, PHONE_NONCE_CONFIG);
 
     ASSERT_EQ_INT(handshake_stage(&h), HandshakeConfigRequested);
@@ -209,9 +223,9 @@ TEST(test_stages_may_repeat) {
 
     handshake_init(&h, &id);
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 2);
+    ASSERT_EQ_INT(reply.count, 4);
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 2);
+    ASSERT_EQ_INT(reply.count, 4);
 }
 
 TEST(test_tolerates_null) {
@@ -226,7 +240,7 @@ TEST(test_tolerates_null) {
 
 TEST_MAIN_BEGIN()
 RUN_TEST(test_starts_idle);
-RUN_TEST(test_stage_one_returns_my_node_info_then_config_complete);
+RUN_TEST(test_stage_one_sends_my_info_node_info_metadata_then_complete);
 RUN_TEST(test_stage_two_returns_node_info_then_config_complete);
 RUN_TEST(test_full_two_stage_sequence);
 RUN_TEST(test_unknown_nonce_is_rejected_and_sends_nothing);

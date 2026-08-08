@@ -44,7 +44,22 @@ bool handshake_handle_to_radio(
     if(!phone_decode_want_config_id(data, len, &nonce)) return false;
 
     if(nonce == PHONE_NONCE_CONFIG) {
+        /* Order follows the firmware's own state machine, PhoneAPI.cpp
+         * getFromRadio(): my_info, then the node's own NodeInfo, then metadata,
+         * then config_complete.
+         *
+         * The NodeInfo here is what carries this device's name. Sending it only
+         * in stage 2, as this did before, completed the handshake and still left
+         * the app showing a node with no name. */
         written = phone_encode_my_node_info(
+            &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+        if(!push(reply, written)) return false;
+
+        written = phone_encode_node_info(
+            &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+        if(!push(reply, written)) return false;
+
+        written = phone_encode_device_metadata(
             &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
 

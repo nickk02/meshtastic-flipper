@@ -15,6 +15,25 @@
 #define NODEINFO_FIELD_NUM  1
 #define NODEINFO_FIELD_USER 2
 
+/* mesh.proto, message DeviceMetadata. */
+#define METADATA_FIELD_FIRMWARE_VERSION     1
+#define METADATA_FIELD_DEVICE_STATE_VERSION 2
+#define METADATA_FIELD_HAS_BLUETOOTH        5
+#define METADATA_FIELD_HW_MODEL             9
+
+/* Reported to the app as this device's firmware version.
+ *
+ * The app parses it as a version string and uses it to decide whether the
+ * device is supported. It is a claim about protocol compatibility, not about
+ * this being Meshtastic firmware, and it is deliberately a version whose phone
+ * protocol this app actually implements. */
+#define PHONE_FIRMWARE_VERSION "2.5.0"
+
+/* device_state_version tracks the on-device database layout. The app only
+ * compares it, so any stable value works; this one matches what the 2.5 series
+ * reports. */
+#define PHONE_DEVICE_STATE_VERSION 23
+
 /* User field numbers. mesh.proto, message User. Note that field 4 is retired,
  * so hw_model is 5 and not 4. */
 #define USER_FIELD_ID         1
@@ -184,6 +203,29 @@ bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce
     }
 
     return found;
+}
+
+size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_t out_len) {
+    uint8_t body[64];
+    PbWriter meta;
+    PbWriter msg;
+
+    if(id == NULL || out == NULL) return 0;
+
+    pb_writer_init(&meta, body, sizeof(body));
+    pb_write_string_field(&meta, METADATA_FIELD_FIRMWARE_VERSION, PHONE_FIRMWARE_VERSION);
+    pb_write_varint_field(&meta, METADATA_FIELD_DEVICE_STATE_VERSION, PHONE_DEVICE_STATE_VERSION);
+    /* Written even though it is true, because the default-omit rule would drop
+     * it and the app treats a missing hasBluetooth as false. */
+    pb_write_varint_field_always(&meta, METADATA_FIELD_HAS_BLUETOOTH, 1);
+    pb_write_varint_field(&meta, METADATA_FIELD_HW_MODEL, id->hw_model);
+    if(!pb_writer_ok(&meta)) return 0;
+
+    pb_writer_init(&msg, out, out_len);
+    pb_write_submessage(&msg, FROMRADIO_FIELD_METADATA, body, pb_writer_len(&meta));
+    if(!pb_writer_ok(&msg)) return 0;
+
+    return pb_writer_len(&msg);
 }
 
 void phone_identity_init(
