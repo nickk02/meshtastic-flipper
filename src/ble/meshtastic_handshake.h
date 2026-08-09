@@ -30,7 +30,7 @@ typedef enum {
 
 /* Up to two messages are produced per request: a body, then the completion
  * marker. */
-#define HANDSHAKE_MAX_REPLIES 4
+#define HANDSHAKE_MAX_REPLIES 6
 #define HANDSHAKE_MAX_MESSAGE 192
 
 typedef struct {

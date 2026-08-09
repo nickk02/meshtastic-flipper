@@ -80,7 +80,7 @@ TEST(test_starts_idle) {
  * Sending the NodeInfo only in stage 2 still completed the handshake, and the
  * phone was left showing a node with no name. The order mirrors the firmware's
  * own state machine in PhoneAPI.cpp getFromRadio(). */
-TEST(test_stage_one_sends_my_info_node_info_metadata_then_complete) {
+TEST(test_stage_one_follows_the_firmware_order) {
     Handshake h;
     PhoneIdentity id = identity();
     HandshakeReply reply;
@@ -91,7 +91,7 @@ TEST(test_stage_one_sends_my_info_node_info_metadata_then_complete) {
     size_t len = make_want_config(PHONE_NONCE_CONFIG, to_radio, sizeof(to_radio));
 
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 4);
+    ASSERT_EQ_INT(reply.count, 6);
 
     /* my_info, field 3. */
     ASSERT_TRUE(reply.messages[0].len > 0);
@@ -106,9 +106,18 @@ TEST(test_stage_one_sends_my_info_node_info_metadata_then_complete) {
     ASSERT_TRUE(reply.messages[2].len > 0);
     ASSERT_EQ_INT(reply.messages[2].data[0] >> 3, FROMRADIO_FIELD_METADATA);
 
-    /* config_complete_id, field 7, carrying the nonce that was asked for. */
+    /* channel, field 10. Without it the app has a node on no channel. */
+    ASSERT_TRUE(reply.messages[3].len > 0);
+    ASSERT_EQ_INT(reply.messages[3].data[0] >> 3, FROMRADIO_FIELD_CHANNEL);
+
+    /* config, field 5, carrying the lora sub-message. */
+    ASSERT_TRUE(reply.messages[4].len > 0);
+    ASSERT_EQ_INT(reply.messages[4].data[0] >> 3, FROMRADIO_FIELD_CONFIG);
+
+    /* config_complete_id, field 7, carrying the nonce that was asked for.
+     * PhoneAPI.cpp calls this the sentinel: it is what ends the stage. */
     ASSERT_TRUE(has_varint_field(
-        reply.messages[3].data, reply.messages[3].len, FROMRADIO_FIELD_CONFIG_COMPLETE_ID, &value));
+        reply.messages[5].data, reply.messages[5].len, FROMRADIO_FIELD_CONFIG_COMPLETE_ID, &value));
     ASSERT_EQ_INT(value, PHONE_NONCE_CONFIG);
 
     ASSERT_EQ_INT(handshake_stage(&h), HandshakeConfigRequested);
@@ -223,9 +232,9 @@ TEST(test_stages_may_repeat) {
 
     handshake_init(&h, &id);
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 4);
+    ASSERT_EQ_INT(reply.count, 6);
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 4);
+    ASSERT_EQ_INT(reply.count, 6);
 }
 
 TEST(test_tolerates_null) {
@@ -240,7 +249,7 @@ TEST(test_tolerates_null) {
 
 TEST_MAIN_BEGIN()
 RUN_TEST(test_starts_idle);
-RUN_TEST(test_stage_one_sends_my_info_node_info_metadata_then_complete);
+RUN_TEST(test_stage_one_follows_the_firmware_order);
 RUN_TEST(test_stage_two_returns_node_info_then_config_complete);
 RUN_TEST(test_full_two_stage_sequence);
 RUN_TEST(test_unknown_nonce_is_rejected_and_sends_nothing);

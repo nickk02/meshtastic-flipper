@@ -228,6 +228,91 @@ size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_
     return pb_writer_len(&msg);
 }
 
+/* channel.proto, message Channel and message ChannelSettings. */
+#define CHANNEL_FIELD_SETTINGS      2
+#define CHANNEL_FIELD_ROLE          3
+#define CHANNEL_SETTINGS_FIELD_PSK  2
+#define CHANNEL_SETTINGS_FIELD_NAME 3
+#define CHANNEL_ROLE_PRIMARY        1
+
+/* config.proto: Config.lora is 6, and the LoRaConfig fields below. */
+#define CONFIG_FIELD_LORA       6
+#define LORA_FIELD_USE_PRESET   1
+#define LORA_FIELD_MODEM_PRESET 2
+#define LORA_FIELD_REGION       7
+#define LORA_FIELD_TX_ENABLED   9
+#define LORA_FIELD_CHANNEL_NUM  11
+
+#define LORA_REGION_US              1
+#define LORA_MODEM_PRESET_LONG_FAST 0
+
+size_t phone_encode_primary_channel(
+    const char* name,
+    uint8_t psk_index,
+    uint8_t* out,
+    size_t out_len) {
+    uint8_t settings[64];
+    uint8_t body[96];
+    PbWriter set_writer;
+    PbWriter body_writer;
+    PbWriter msg;
+
+    if(name == NULL || out == NULL) return 0;
+
+    pb_writer_init(&set_writer, settings, sizeof(settings));
+    pb_write_bytes_field(&set_writer, CHANNEL_SETTINGS_FIELD_PSK, &psk_index, 1);
+    pb_write_string_field(&set_writer, CHANNEL_SETTINGS_FIELD_NAME, name);
+    if(!pb_writer_ok(&set_writer)) return 0;
+
+    pb_writer_init(&body_writer, body, sizeof(body));
+    /* Channel.index is left out. The primary channel is index 0, and protobuf
+     * omits zero-valued scalars, so absent and zero are the same thing here. */
+    pb_write_submessage(
+        &body_writer, CHANNEL_FIELD_SETTINGS, settings, pb_writer_len(&set_writer));
+    pb_write_varint_field_always(&body_writer, CHANNEL_FIELD_ROLE, CHANNEL_ROLE_PRIMARY);
+    if(!pb_writer_ok(&body_writer)) return 0;
+
+    pb_writer_init(&msg, out, out_len);
+    pb_write_submessage(&msg, FROMRADIO_FIELD_CHANNEL, body, pb_writer_len(&body_writer));
+    if(!pb_writer_ok(&msg)) return 0;
+
+    return pb_writer_len(&msg);
+}
+
+size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_len) {
+    uint8_t lora[64];
+    uint8_t body[96];
+    PbWriter lora_writer;
+    PbWriter body_writer;
+    PbWriter msg;
+
+    if(out == NULL) return 0;
+
+    pb_writer_init(&lora_writer, lora, sizeof(lora));
+    pb_write_varint_field_always(&lora_writer, LORA_FIELD_USE_PRESET, 1);
+    /* LONG_FAST is 0, which a default-omitting writer would drop. Absent and
+     * LONG_FAST happen to mean the same thing, but relying on that would make
+     * the message say nothing about the preset, so it is written out. */
+    pb_write_varint_field_always(
+        &lora_writer, LORA_FIELD_MODEM_PRESET, LORA_MODEM_PRESET_LONG_FAST);
+    pb_write_varint_field_always(&lora_writer, LORA_FIELD_REGION, LORA_REGION_US);
+    /* Written as false on purpose. This build has no transmit path, and letting
+     * the app believe otherwise invites it to queue messages that never go out. */
+    pb_write_varint_field_always(&lora_writer, LORA_FIELD_TX_ENABLED, 0);
+    pb_write_varint_field(&lora_writer, LORA_FIELD_CHANNEL_NUM, channel_num);
+    if(!pb_writer_ok(&lora_writer)) return 0;
+
+    pb_writer_init(&body_writer, body, sizeof(body));
+    pb_write_submessage(&body_writer, CONFIG_FIELD_LORA, lora, pb_writer_len(&lora_writer));
+    if(!pb_writer_ok(&body_writer)) return 0;
+
+    pb_writer_init(&msg, out, out_len);
+    pb_write_submessage(&msg, FROMRADIO_FIELD_CONFIG, body, pb_writer_len(&body_writer));
+    if(!pb_writer_ok(&msg)) return 0;
+
+    return pb_writer_len(&msg);
+}
+
 void phone_identity_init(
     PhoneIdentity* out,
     uint32_t node_num,
