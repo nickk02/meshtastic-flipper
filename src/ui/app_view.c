@@ -136,6 +136,21 @@ static void draw_home(Canvas* canvas, MeshApp* app) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str_aligned(canvas, SCREEN_W / 2, 62, AlignCenter, AlignBottom, app->node_name);
     canvas_set_font(canvas, FontSecondary);
+    /* Row 4: heap. RAM is this project's governing constraint, so the number
+     * that decides what else can be added belongs on screen rather than in an
+     * estimate.
+     *
+     * Free is the heap right now. Low is memmgr_get_minimum_free_heap, the
+     * smallest free heap since boot, which is the high-water mark of everything
+     * this app has allocated including the BLE stack's buffers. Low is the
+     * figure to budget against, not Free. */
+    snprintf(
+        line,
+        sizeof(line),
+        "Heap:%luk Low:%luk",
+        (unsigned long)(memmgr_get_free_heap() / 1024),
+        (unsigned long)(memmgr_get_minimum_free_heap() / 1024));
+    canvas_draw_str(canvas, 2, BODY_TOP + 3 * ROW_H, line);
 }
 
 static void draw_messages(Canvas* canvas, MeshApp* app) {
