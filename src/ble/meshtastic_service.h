@@ -25,7 +25,7 @@ typedef struct MeshtasticBleService MeshtasticBleService;
  * Keep it short. */
 typedef void (*MeshtasticBleToRadioCallback)(const uint8_t* data, size_t len, void* context);
 
-MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity);
+MeshtasticBleService* meshtastic_ble_service_alloc(const MeshConfig* config);
 void meshtastic_ble_service_free(MeshtasticBleService* service);
 
 void meshtastic_ble_service_set_callback(

@@ -38,8 +38,8 @@ typedef struct {
     MeshtasticBleService* service;
 } MeshtasticProfile;
 
-static PhoneIdentity pending_identity;
-static bool pending_identity_set = false;
+static MeshConfig pending_config;
+static bool pending_config_set = false;
 static MeshBleState ble_state = MeshBleIdle;
 
 MeshBleState meshtastic_ble_state(void) {
@@ -67,8 +67,7 @@ static FuriHalBleProfileBase* profile_start(FuriHalBleProfileParams params) {
     memset(profile, 0, sizeof(MeshtasticProfile));
     profile->base.config = ble_profile_meshtastic;
 
-    profile->service =
-        meshtastic_ble_service_alloc(pending_identity_set ? &pending_identity : NULL);
+    profile->service = meshtastic_ble_service_alloc(pending_config_set ? &pending_config : NULL);
     if(profile->service == NULL) {
         FURI_LOG_E(TAG, "GATT service failed to start");
         free(profile);
@@ -143,10 +142,10 @@ static const FuriHalBleProfileTemplate profile_template = {
 
 const FuriHalBleProfileTemplate* ble_profile_meshtastic = &profile_template;
 
-MeshtasticBleService* meshtastic_ble_start(const PhoneIdentity* identity) {
-    if(identity != NULL) {
-        pending_identity = *identity;
-        pending_identity_set = true;
+MeshtasticBleService* meshtastic_ble_start(const MeshConfig* config) {
+    if(config != NULL) {
+        pending_config = *config;
+        pending_config_set = true;
     }
 
     /* The Bt service skips this whole path when the second core is not alive

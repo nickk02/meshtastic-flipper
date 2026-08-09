@@ -119,7 +119,7 @@ struct MeshtasticBleService {
     PendingWrite inbound;
 
     Handshake handshake;
-    PhoneIdentity identity;
+    MeshConfig config;
 
     /* Owned here rather than declared in the event handler. That handler runs
      * on the BLE stack's thread, whose stack we neither size nor control, and
@@ -514,13 +514,13 @@ static int32_t ble_worker(void* context) {
     return 0;
 }
 
-MeshtasticBleService* meshtastic_ble_service_alloc(const PhoneIdentity* identity) {
+MeshtasticBleService* meshtastic_ble_service_alloc(const MeshConfig* config) {
     MeshtasticBleService* service = malloc(sizeof(MeshtasticBleService));
     memset(service, 0, sizeof(MeshtasticBleService));
 
     service->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
-    if(identity) service->identity = *identity;
-    handshake_init(&service->handshake, identity);
+    if(config) service->config = *config;
+    handshake_init(&service->handshake, config);
 
     const Service_UUID_t service_uuid = {.Service_UUID_128 = UUID_REVERSED_MESH_SERVICE};
     if(!ble_gatt_service_add(

@@ -39,7 +39,7 @@ const char* meshtastic_ble_state_name(MeshBleState state);
 /* Bring the profile up. Returns NULL if Bluetooth is unavailable or the
  * profile fails to start, in which case the caller should carry on without
  * phone support rather than failing outright. */
-MeshtasticBleService* meshtastic_ble_start(const PhoneIdentity* identity);
+MeshtasticBleService* meshtastic_ble_start(const MeshConfig* config);
 
 /* Bring it down and restore the Flipper's default profile. */
 void meshtastic_ble_stop(MeshtasticBleService* service);

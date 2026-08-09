@@ -30,6 +30,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "src/model/mesh_config.h"
+
 /* FromRadio field numbers. mesh.proto, message FromRadio. */
 #define FROMRADIO_FIELD_PACKET             2
 #define FROMRADIO_FIELD_MY_INFO            3
@@ -70,6 +72,13 @@ typedef struct {
 } PhoneIdentity;
 
 /* Fill an identity, truncating any oversized name rather than overflowing. */
+/* Derive the wire-facing identity from the shared config record.
+ *
+ * PhoneIdentity is a view, not a source. The record in MeshConfig is the one
+ * place this node's identity is defined, and everything on the wire is computed
+ * from it so the two cannot drift. */
+void phone_identity_from_config(const MeshConfig* config, PhoneIdentity* out);
+
 void phone_identity_init(
     PhoneIdentity* out,
     uint32_t node_num,

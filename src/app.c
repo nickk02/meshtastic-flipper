@@ -93,16 +93,18 @@ MeshApp* mesh_app_alloc(void) {
     uint32_t node_num =
         ((uint32_t)mac[0] << 24 | (uint32_t)mac[1] << 16 | (uint32_t)mac[2] << 8 | mac[3]) &
         0x7FFFFFFFu;
-    PhoneIdentity identity;
-    phone_identity_init(&identity, node_num, "Flipper Mesh", "FLPR");
+    /* One record, built once. The BLE side, the UI and later the radio all
+     * read from this rather than each holding their own idea of what this node
+     * is called and what channel it is on. */
+    mesh_config_defaults(&app->config, node_num);
 
     /* Cached for the UI. The LoRa frame shows what the radio is actually
      * tuned to, so it comes from the same config the driver uses. */
     lora_config_us_longfast(LORA_PRIMARY_CHANNEL_NAME, &app->lora);
-    strncpy(app->node_name, identity.long_name, sizeof(app->node_name) - 1);
+    strncpy(app->node_name, app->config.owner.long_name, sizeof(app->node_name) - 1);
     /* Real devices show the last two bytes of the BLE MAC here. */
     snprintf(app->ble_id, sizeof(app->ble_id), "%02x%02x", mac[4], mac[5]);
-    app->ble = meshtastic_ble_start(&identity);
+    app->ble = meshtastic_ble_start(&app->config);
 
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     app->view_port = view_port_alloc();

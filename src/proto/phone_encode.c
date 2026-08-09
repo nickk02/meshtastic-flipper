@@ -313,6 +313,19 @@ size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_l
     return pb_writer_len(&msg);
 }
 
+void phone_identity_from_config(const MeshConfig* config, PhoneIdentity* out) {
+    if(out == NULL) return;
+    if(config == NULL) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+
+    /* hw_model stays 0, HW_UNSET. Claiming a hardware model this is not would
+     * make the app show a device picture and capabilities that do not exist. */
+    phone_identity_init(
+        out, config->owner.node_num, config->owner.long_name, config->owner.short_name);
+}
+
 void phone_identity_init(
     PhoneIdentity* out,
     uint32_t node_num,
