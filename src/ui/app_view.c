@@ -349,12 +349,25 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
     canvas_draw_str(canvas, 2, BODY_TOP + 3 * ROW_H, line);
 }
 
+/* Runs on the GUI thread. view_port.h marks the draw callback
+ * "@warning called from GUI thread", and that thread is a shared system
+ * service rather than something this app owns. Waiting here blocks every
+ * other app's drawing too, so a lock this callback cannot get is a system
+ * freeze, not a dropped frame.
+ *
+ * The same mistake was fixed once already, on the BLE service mutex in
+ * v0.7.5. This is the other lock, and it was left holding FuriWaitForever.
+ *
+ * The radio thread's critical section is short and pure computation, so the
+ * lock is almost always free. When it is not, drawing the frame with slightly
+ * stale model data is correct and freezing is not. */
 void app_view_draw(Canvas* canvas, void* context) {
     MeshApp* app = context;
+    bool locked;
 
     canvas_clear(canvas);
 
-    furi_mutex_acquire(app->mutex, FuriWaitForever);
+    locked = furi_mutex_acquire(app->mutex, 0) == FuriStatusOk;
 
     draw_header(canvas, app);
     canvas_set_font(canvas, FontSecondary);
@@ -383,13 +396,17 @@ void app_view_draw(Canvas* canvas, void* context) {
         break;
     }
 
-    furi_mutex_release(app->mutex);
+    if(locked) furi_mutex_release(app->mutex);
 }
 
+/* Called from the input handler to clamp scrolling, so it runs on the GUI
+ * thread as well and must not block for the same reason as app_view_draw. A
+ * stale count clamps to a row that existed a moment ago, which the next redraw
+ * corrects. */
 size_t app_view_row_count(MeshApp* app) {
     size_t rows = 0;
+    bool locked = furi_mutex_acquire(app->mutex, 0) == FuriStatusOk;
 
-    furi_mutex_acquire(app->mutex, FuriWaitForever);
     switch(app->page) {
     case PageMessages:
         rows = message_ring_count(&app->messages);
@@ -406,7 +423,7 @@ size_t app_view_row_count(MeshApp* app) {
         rows = 0;
         break;
     }
-    furi_mutex_release(app->mutex);
+    if(locked) furi_mutex_release(app->mutex);
 
     return rows;
 }
