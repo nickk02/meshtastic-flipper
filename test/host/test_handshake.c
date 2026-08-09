@@ -9,10 +9,10 @@
 #include "src/ble/meshtastic_handshake.h"
 #include "src/proto/pb_write.h"
 
-static PhoneIdentity identity(void) {
-    PhoneIdentity id;
-    phone_identity_init(&id, 0x11223344, "Flipper Mesh", "FLPR");
-    return id;
+static MeshConfig identity(void) {
+    MeshConfig c;
+    mesh_config_defaults(&c, 0x11223344);
+    return c;
 }
 
 static size_t make_want_config(uint32_t nonce, uint8_t* buf, size_t cap) {
@@ -69,7 +69,7 @@ static bool has_varint_field(const uint8_t* buf, size_t len, uint32_t want, uint
 
 TEST(test_starts_idle) {
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     handshake_init(&h, &id);
     ASSERT_EQ_INT(handshake_stage(&h), HandshakeIdle);
     ASSERT_TRUE(!handshake_is_complete(&h));
@@ -82,7 +82,7 @@ TEST(test_starts_idle) {
  * own state machine in PhoneAPI.cpp getFromRadio(). */
 TEST(test_stage_one_follows_the_firmware_order) {
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     uint8_t to_radio[16];
     uint64_t value = 0;
@@ -126,7 +126,7 @@ TEST(test_stage_one_follows_the_firmware_order) {
 
 TEST(test_stage_two_returns_node_info_then_config_complete) {
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     uint8_t to_radio[16];
     uint64_t value = 0;
@@ -147,7 +147,7 @@ TEST(test_stage_two_returns_node_info_then_config_complete) {
 
 TEST(test_full_two_stage_sequence) {
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     uint8_t to_radio[16];
     size_t len;
@@ -167,7 +167,7 @@ TEST(test_unknown_nonce_is_rejected_and_sends_nothing) {
     /* Answering a stage the app did not ask for makes it discard the reply and
        stall, so an unrecognized nonce must produce no messages at all. */
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     uint8_t to_radio[16];
 
@@ -181,7 +181,7 @@ TEST(test_unknown_nonce_is_rejected_and_sends_nothing) {
 
 TEST(test_to_radio_without_want_config_is_ignored) {
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     uint8_t to_radio[16];
     PbWriter w;
@@ -196,7 +196,7 @@ TEST(test_to_radio_without_want_config_is_ignored) {
 
 TEST(test_malformed_to_radio_is_ignored) {
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     const uint8_t truncated[] = {0x18, 0x80};
 
@@ -207,7 +207,7 @@ TEST(test_malformed_to_radio_is_ignored) {
 
 TEST(test_reset_returns_to_idle) {
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     uint8_t to_radio[16];
 
@@ -225,7 +225,7 @@ TEST(test_stages_may_repeat) {
     /* A phone that reconnects re-runs the whole handshake. Handling stage 1
        twice must work rather than being treated as out of order. */
     Handshake h;
-    PhoneIdentity id = identity();
+    MeshConfig id = identity();
     HandshakeReply reply;
     uint8_t to_radio[16];
     size_t len = make_want_config(PHONE_NONCE_CONFIG, to_radio, sizeof(to_radio));

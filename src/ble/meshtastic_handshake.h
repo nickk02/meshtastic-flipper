@@ -44,11 +44,15 @@ typedef struct {
 } HandshakeReply;
 
 typedef struct {
+    MeshConfig config;
     PhoneIdentity identity;
     HandshakeStage stage;
 } Handshake;
 
-void handshake_init(Handshake* h, const PhoneIdentity* identity);
+/* The config record is copied, not referenced. The handshake runs on the BLE
+ * worker thread and the record is edited from the UI thread, so sharing a
+ * pointer would need a lock on every field read. */
+void handshake_init(Handshake* h, const MeshConfig* config);
 
 /* Handle a ToRadio the phone wrote.
  *

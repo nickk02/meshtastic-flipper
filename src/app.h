@@ -11,6 +11,7 @@
 #include <input/input.h>
 
 #include "src/proto/mesh_decode.h"
+#include "src/model/mesh_config.h"
 #include "src/model/message_ring.h"
 #include "src/model/mesh_event.h"
 #include "src/model/node_roster.h"
@@ -58,6 +59,10 @@ typedef struct {
     RawFrame rx_frame;
     MeshDecoded rx_decoded;
     MeshEvent rx_event;
+
+    /* What this node is: identity, channel, LoRa settings. The single source
+     * the BLE handshake, the UI and later the radio all read from. */
+    MeshConfig config;
 
     LoraConfig lora;
     char node_name[PHONE_LONG_NAME_MAX];

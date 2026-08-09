@@ -1,21 +1,17 @@
 #include "src/ble/meshtastic_handshake.h"
 
-/* What this device tells the phone its radio is set to.
- *
- * These duplicate values the radio side also holds, which is exactly the
- * duplication to remove once a shared config store exists. Until then they live
- * in one place rather than being spread through the encoders, so there is a
- * single line to change. */
-#define HANDSHAKE_CHANNEL_NAME      "LongFast"
-#define HANDSHAKE_CHANNEL_PSK_INDEX 1
-#define HANDSHAKE_LORA_CHANNEL_NUM  20
-
 #include <string.h>
 
-void handshake_init(Handshake* h, const PhoneIdentity* identity) {
+void handshake_init(Handshake* h, const MeshConfig* config) {
     if(h == NULL) return;
     memset(h, 0, sizeof(*h));
-    if(identity != NULL) h->identity = *identity;
+    if(config != NULL) {
+        h->config = *config;
+        /* The wire identity is derived here rather than passed in, so there is
+         * no way to hand the handshake an identity that disagrees with the
+         * record it answers config questions from. */
+        phone_identity_from_config(config, &h->identity);
+    }
     h->stage = HandshakeIdle;
 }
 
@@ -74,14 +70,14 @@ bool handshake_handle_to_radio(
         if(!push(reply, written)) return false;
 
         written = phone_encode_primary_channel(
-            HANDSHAKE_CHANNEL_NAME,
-            HANDSHAKE_CHANNEL_PSK_INDEX,
+            h->config.channel.name,
+            h->config.channel.psk_index,
             reply->messages[reply->count].data,
             HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
 
         written = phone_encode_lora_config(
-            HANDSHAKE_LORA_CHANNEL_NUM, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            h->config.lora.channel_num, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
 
         written = phone_encode_config_complete(
