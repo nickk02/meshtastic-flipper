@@ -1,5 +1,15 @@
 #include "src/ble/meshtastic_handshake.h"
 
+/* What this device tells the phone its radio is set to.
+ *
+ * These duplicate values the radio side also holds, which is exactly the
+ * duplication to remove once a shared config store exists. Until then they live
+ * in one place rather than being spread through the encoders, so there is a
+ * single line to change. */
+#define HANDSHAKE_CHANNEL_NAME      "LongFast"
+#define HANDSHAKE_CHANNEL_PSK_INDEX 1
+#define HANDSHAKE_LORA_CHANNEL_NUM  20
+
 #include <string.h>
 
 void handshake_init(Handshake* h, const PhoneIdentity* identity) {
@@ -61,6 +71,17 @@ bool handshake_handle_to_radio(
 
         written = phone_encode_device_metadata(
             &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+        if(!push(reply, written)) return false;
+
+        written = phone_encode_primary_channel(
+            HANDSHAKE_CHANNEL_NAME,
+            HANDSHAKE_CHANNEL_PSK_INDEX,
+            reply->messages[reply->count].data,
+            HANDSHAKE_MAX_MESSAGE);
+        if(!push(reply, written)) return false;
+
+        written = phone_encode_lora_config(
+            HANDSHAKE_LORA_CHANNEL_NUM, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
 
         written = phone_encode_config_complete(

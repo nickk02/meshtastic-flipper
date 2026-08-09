@@ -36,6 +36,7 @@
 #define FROMRADIO_FIELD_NODE_INFO          4
 #define FROMRADIO_FIELD_CONFIG_COMPLETE_ID 7
 #define FROMRADIO_FIELD_CHANNEL            10
+#define FROMRADIO_FIELD_CONFIG             5
 #define FROMRADIO_FIELD_METADATA           13
 
 /* ToRadio field numbers. mesh.proto, message ToRadio. */
@@ -97,6 +98,25 @@ size_t phone_encode_config_complete(uint32_t nonce, uint8_t* out, size_t out_len
  * all, so a node that never sends metadata is a node it cannot fully adopt.
  * Field numbers from mesh.proto, message DeviceMetadata. */
 size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_t out_len);
+
+/* FromRadio { channel { ... } } for the primary channel.
+ *
+ * psk_index is written as a one byte psk. Meshtastic reads a single byte psk as
+ * a key index rather than a key, which is how the default channel is expressed.
+ * channel.proto, message ChannelSettings.
+ *
+ * The name and index passed here must match what the radio is actually tuned
+ * to. They are supplied by the caller rather than defined here so there is one
+ * place to change when the shared config store lands. */
+size_t
+    phone_encode_primary_channel(const char* name, uint8_t psk_index, uint8_t* out, size_t out_len);
+
+/* FromRadio { config { lora { ... } } }.
+ *
+ * Without this the app has a node with no region and no modem preset, so it
+ * cannot show or change what the radio is doing. config.proto, message
+ * LoRaConfig. */
+size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_len);
 
 /* FromRadio { packet { ... } }, wrapping an already-built MeshPacket. */
 size_t phone_encode_packet(
