@@ -368,6 +368,13 @@ static void drain_step(MeshtasticBleService* service) {
     /* Run one step past empty so the drained queue is published as a
      * zero-length read. That empty read is how the phone learns to stop. */
     service->drain_active = had_message || service->pending > 0;
+    if(!service->drain_active) {
+        FURI_LOG_I(
+            TAG,
+            "batch drained, %lu sent, %lu refused",
+            (unsigned long)service->stat_drained,
+            (unsigned long)service->stat_fail_radio);
+    }
     /* Armed again for the next batch once this one is fully drained. */
     if(!service->drain_active) service->doorbell_rung = false;
     furi_mutex_release(service->mutex);
@@ -422,12 +429,42 @@ void meshtastic_ble_service_set_callback(
     service->callback_context = context;
 }
 
-/* Called when the phone writes ToRadio. Runs the handshake and queues whatever
- * it produces. */
+/* Hex of the first bytes of a message, for the log.
+ *
+ * Every failure on this project so far has been "the phone sent something and
+ * the device silently did nothing with it". The bytes are the only thing that
+ * distinguishes a message we ignored on purpose from one we failed to parse. */
+static void hex_prefix(const uint8_t* data, size_t len, char* out, size_t out_len) {
+    static const char digits[] = "0123456789abcdef";
+    size_t n = 0;
+
+    while(n + 3 < out_len && n / 3 < len) {
+        uint8_t byte = data[n / 3];
+        out[n++] = digits[byte >> 4];
+        out[n++] = digits[byte & 0x0F];
+        out[n++] = ' ';
+    }
+    out[n] = 0;
+}
+
 static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, size_t len) {
     uint32_t nonce = 0;
+    bool understood = false;
+    char hex[3 * 16 + 1];
 
-    if(phone_decode_want_config_id(data, len, &nonce)) service->stat_last_nonce = nonce;
+    hex_prefix(data, len, hex, sizeof(hex));
+
+    if(phone_decode_want_config_id(data, len, &nonce)) {
+        service->stat_last_nonce = nonce;
+        understood = true;
+        FURI_LOG_I(TAG, "ToRadio want_config_id nonce=%lu", (unsigned long)nonce);
+    } else if(len > 0 && (data[0] >> 3) == TORADIO_FIELD_HEARTBEAT) {
+        /* The settle heartbeat between stages. The firmware does not echo it,
+         * so sending nothing back is correct, and this line is here so a silent
+         * device can be told apart from a deaf one. */
+        understood = true;
+        FURI_LOG_I(TAG, "ToRadio heartbeat, no reply expected");
+    }
 
     /* The first tag of the ToRadio message. ToRadio is a oneof, so this is what
      * the phone actually sent: 3 is want_config_id, 7 is heartbeat, 1 is a
@@ -445,9 +482,29 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
     size_t count = have_reply ? service->reply.count : 0;
     furi_mutex_release(service->mutex);
 
+    if(have_reply) understood = true;
+
+    /* The line worth having. A ToRadio nobody recognised is the shape of every
+     * stall on this project, and the counters cannot show it: they only say a
+     * write arrived, not that it went unanswered. */
+    if(!understood) {
+        FURI_LOG_W(
+            TAG,
+            "ToRadio not understood: tag=%u len=%u %s",
+            len > 0 ? (unsigned)(data[0] >> 3) : 0,
+            (unsigned)len,
+            hex);
+    }
+
+    if(count > 0) FURI_LOG_I(TAG, "queueing %u replies", (unsigned)count);
+
     for(size_t i = 0; i < count; i++) {
-        meshtastic_ble_service_queue(
-            service, service->reply.messages[i].data, service->reply.messages[i].len);
+        if(!meshtastic_ble_service_queue(
+               service, service->reply.messages[i].data, service->reply.messages[i].len)) {
+            /* A dropped reply truncates a sequence the client assumes the shape
+             * of, so it must never pass unremarked. */
+            FURI_LOG_E(TAG, "queue full, reply %u of %u dropped", (unsigned)i, (unsigned)count);
+        }
     }
 
     if(service->callback) {
