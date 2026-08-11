@@ -196,9 +196,49 @@ frame.
 channel crypto is AES128-CTR, so this project vendors tiny-AES-c. Any note
 saying to use `furi_hal_crypto` for it is wrong.
 
+## 5a. The admin exchange, and what it takes to answer it
+
+After stage 2 the phone issues `AdminMessage.get_owner_request` and does not
+report Connected until `get_owner_response` lands with a `session_passkey`.
+Without it the client times out and reconnects, which on the device looks like
+both stages completing over and over.
+
+Admin messages ride inside a `MeshPacket`, so answering one means building the
+whole envelope rather than another FromRadio variant.
+
+`MeshPacket`: `from` 1 (fixed32), `to` 2 (fixed32), `channel` 3, `decoded` 4
+(Data), `encrypted` 5, `id` 6 (fixed32), `rx_time` 7, `rx_snr` 8, `hop_limit` 9,
+`want_ack` 10, `priority` 11, `rx_rssi` 12.
+
+Note `from`, `to`, `id`, `dest`, `source` and `request_id` are **fixed32**, not
+varint. A varint there produces a message the client silently ignores.
+
+`Data`: `portnum` 1, `payload` 2, `want_response` 3, `dest` 4, `source` 5,
+`request_id` 6, `reply_id` 7, `emoji` 8.
+
+`PortNum.ADMIN_APP` is 6. For reference `TEXT_MESSAGE_APP` 1, `NODEINFO_APP` 4,
+`ROUTING_APP` 5.
+
+`AdminMessage`: `get_owner_request` 3 (bool), `get_owner_response` 4 (User),
+`session_passkey` 101 (bytes).
+
+So the reply is
+`FromRadio.packet -> MeshPacket.decoded -> Data{portnum: 6, payload:
+AdminMessage{get_owner_response: User, session_passkey: 8 bytes}}`,
+with `request_id` echoing the request's `id` so the client can match it.
+
+The passkey is 8 bytes, valid for roughly 300 seconds and regenerated at about
+150, and every state-changing admin request must carry a current one. A stale
+one is answered with `Routing.error_reason = ADMIN_BAD_SESSION_KEY`. That
+lifetime is why the owner record has to persist rather than being a constant.
+
 ## 6. Known gaps
 
-- channels, config, module config and file manifest are absent from stage 1
-- no `get_owner` exchange, so the phone may never report Connected
-- there is no persistent identity, channel or config store, so everything
-  above is currently hardcoded
+- stage 1 is complete and confirmed accepted by a real phone: the client
+  answers it with a settle heartbeat, observed as ToRadio tag 7
+- no `get_owner` exchange. Both stages complete and the phone then reconnects
+  in a loop, which is the documented behaviour when no `session_passkey` is
+  latched. This is the only known protocol gap left
+- no persistent store, so the owner record does not survive a restart
+- `fileInfo` is still not sent. The firmware emits it under nonce 69420, and
+  sending none appears to be acceptable since the client accepts stage 1
