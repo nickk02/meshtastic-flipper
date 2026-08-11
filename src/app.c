@@ -21,6 +21,34 @@ static void input_callback(InputEvent* event, void* context) {
     furi_message_queue_put(queue, event, FuriWaitForever);
 }
 
+/* Answers the loader's exit request.
+ *
+ * Without this the loader reports "Application has to be closed manually" and
+ * refuses to replace a running app, so every install over USB needs someone to
+ * physically back out of it first. base.h defines FuriSignalExit as the
+ * graceful-exit request, and returning true claims it.
+ *
+ * Runs on the loader's thread, so it only sets a flag and posts a wake-up. The
+ * app's own loop does the shutting down. */
+static bool signal_callback(uint32_t signal, void* arg, void* context) {
+    MeshApp* app = context;
+    UNUSED(arg);
+
+    if(signal != FuriSignalExit) return false;
+
+    app->running = false;
+    /* The main loop is parked on its input queue. Posting a back press wakes it
+     * immediately rather than leaving it to time out. */
+    InputEvent exit_event = {.key = InputKeyBack, .type = InputTypeShort};
+    furi_message_queue_put(app->input_queue, &exit_event, 0);
+    return true;
+}
+
+/* Redraw cadence when nothing is happening. Fast enough that the BLE counters
+ * look live during a connection, slow enough that an idle app is not
+ * repainting the screen for no reason. */
+#define UI_REFRESH_MS 250
+
 static int32_t radio_thread(void* context) {
     MeshApp* app = context;
 
@@ -127,6 +155,8 @@ MeshApp* mesh_app_alloc(void) {
     view_port_draw_callback_set(app->view_port, app_view_draw, app);
     view_port_input_callback_set(app->view_port, input_callback, app->input_queue);
 
+    furi_thread_set_signal_callback(furi_thread_get_current(), signal_callback, app);
+
     app->gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(app->gui, app->view_port, GuiLayerFullscreen);
 
@@ -179,7 +209,24 @@ void mesh_app_run(MeshApp* app) {
     app->thread = furi_thread_alloc_ex("MeshRadio", 2048, radio_thread, app);
     furi_thread_start(app->thread);
 
-    while(furi_message_queue_get(app->input_queue, &event, FuriWaitForever) == FuriStatusOk) {
+    /* Wake on a timeout as well as on input, so the screen refreshes without
+     * a button press.
+     *
+     * This used to block forever on the queue, which was fine while the radio
+     * thread called view_port_update after every received frame. Stopping that
+     * thread when no radio answers removed the only periodic redraw, and the
+     * counters went stale until a key was pressed. The BLE page is the one that
+     * has to move on its own, since watching it during a phone connection is
+     * the whole point of it. */
+    while(true) {
+        FuriStatus status = furi_message_queue_get(app->input_queue, &event, UI_REFRESH_MS);
+
+        if(status != FuriStatusOk) {
+            if(!app->running) break;
+            view_port_update(app->view_port);
+            continue;
+        }
+
         if(event.type != InputTypeShort && event.type != InputTypeRepeat) continue;
 
         if(event.key == InputKeyBack) break;
