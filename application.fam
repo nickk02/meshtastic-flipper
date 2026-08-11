@@ -6,7 +6,10 @@ App(
     apptype=FlipperAppType.EXTERNAL,
     entry_point="meshtastic_flipper_app",
     stack_size=2 * 1024,
-    fap_category="Tools",
+    # Installs to /ext/apps rather than /ext/apps/Tools. The category is what the
+    # loader uses to pick the directory, and a subfolder is one more level to
+    # navigate every time this is opened.
+    fap_category="",
     fap_description="Meshtastic LoRa receiver. Requires an external SX1262 module.",
     fap_author="nickk02",
     fap_version="0.1",
