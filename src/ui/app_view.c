@@ -356,15 +356,17 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
     /* Wk is the worker loop's proof of life. If the app is wedged and Wk is
      * not climbing between two looks, the worker stopped and the fault is
      * inside it. If Wk climbs while nothing else moves, the worker is fine and
-     * the fault is elsewhere. Dr counts FromNum notifications, which should be
-     * about one per batch rather than one per message. */
+     * the fault is elsewhere. Db counts FromNum notifications, about one per
+     * batch. W is the first tag and length of the last ToRadio write: 3 is
+     * want_config_id, 7 is heartbeat, 1 is a packet, 4 is disconnect. */
     snprintf(
         line,
         sizeof(line),
-        "Wk:%lu Db:%lu Ev:%lu",
+        "Wk:%lu Db:%lu W%u/%u",
         (unsigned long)st.worker_ticks,
         (unsigned long)st.doorbells,
-        (unsigned long)st.events);
+        (unsigned)st.last_write_field,
+        (unsigned)st.last_write_len);
     canvas_draw_str(canvas, 2, BODY_TOP + 3 * ROW_H, line);
 }
 

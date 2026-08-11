@@ -67,6 +67,13 @@ typedef struct {
      * proof of life: a frozen app with a static tick count means the worker
      * stopped, and a climbing one means it did not. */
     uint32_t doorbells;
+
+    /* First tag and length of the most recent ToRadio write. ToRadio is a
+     * oneof, so the tag says what the phone asked for: 3 want_config_id,
+     * 7 heartbeat, 1 packet, 4 disconnect. A write counter alone could not
+     * distinguish a heartbeat from a want_config this device failed to parse. */
+    uint8_t last_write_field;
+    uint8_t last_write_len;
     uint32_t worker_ticks;
     uint32_t fail_radio;
     uint32_t fail_num;
