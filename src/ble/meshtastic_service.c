@@ -103,6 +103,11 @@ struct MeshtasticBleService {
     uint32_t stat_drained;
     uint32_t stat_publishes;
     uint32_t stat_doorbells;
+    /* Field number and length of the most recent ToRadio write. A write count
+     * alone cannot say what the phone asked for, which left the difference
+     * between a heartbeat and an unparsed want_config invisible. */
+    uint8_t stat_last_write_field;
+    uint8_t stat_last_write_len;
     uint32_t stat_worker_ticks;
     uint32_t stat_fail_radio;
     uint32_t stat_fail_num;
@@ -423,6 +428,14 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
 
     if(phone_decode_want_config_id(data, len, &nonce)) service->stat_last_nonce = nonce;
 
+    /* The first tag of the ToRadio message. ToRadio is a oneof, so this is what
+     * the phone actually sent: 3 is want_config_id, 7 is heartbeat, 1 is a
+     * packet, 4 is disconnect. */
+    if(len > 0) {
+        service->stat_last_write_field = (uint8_t)(data[0] >> 3);
+        service->stat_last_write_len = (uint8_t)(len > 255 ? 255 : len);
+    }
+
     /* service->reply is guarded by the same mutex as the queue. Writes only
      * ever arrive on the BLE thread, so contention is nil, but taking the lock
      * keeps the invariant simple. */
@@ -637,6 +650,8 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
         snap->stage = (uint8_t)handshake_stage(&service->handshake);
         snap->publishes = service->stat_publishes;
         snap->doorbells = service->stat_doorbells;
+        snap->last_write_field = service->stat_last_write_field;
+        snap->last_write_len = service->stat_last_write_len;
         snap->worker_ticks = service->stat_worker_ticks;
         snap->fail_radio = service->stat_fail_radio;
         snap->fail_num = service->stat_fail_num;
