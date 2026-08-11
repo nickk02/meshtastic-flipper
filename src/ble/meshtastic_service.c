@@ -92,11 +92,18 @@ struct MeshtasticBleService {
     bool drain_active;
     uint32_t drain_due_tick;
 
+    /* Whether the doorbell has been rung for the batch being drained. One
+     * notification per batch is what the protocol wants: the client drains
+     * until empty on its own after that. */
+    bool doorbell_rung;
+
     uint32_t stat_writes;
     uint32_t stat_last_nonce;
     uint32_t stat_queued;
     uint32_t stat_drained;
     uint32_t stat_publishes;
+    uint32_t stat_doorbells;
+    uint32_t stat_worker_ticks;
     uint32_t stat_fail_radio;
     uint32_t stat_fail_num;
     uint32_t stat_events;
@@ -298,13 +305,26 @@ static const BleGattCharacteristicParams from_num_params = {
  * The two failures are counted separately because they mean different things.
  * FromRadio failing costs the phone all of its data. FromNum failing costs only
  * the doorbell, and the phone polls regardless. */
-static void publish_head(MeshtasticBleService* service) {
+static void publish_head(MeshtasticBleService* service, bool ring_doorbell) {
     if(ble_gatt_characteristic_update(service->svc_handle, &service->from_radio, service)) {
         service->stat_fail_radio++;
     }
-    if(ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service)) {
-        service->stat_fail_num++;
+
+    /* The doorbell is rung once per batch, not once per message.
+     *
+     * KableMeshtasticRadioProfile.kt reacts to a FromNum notification by
+     * reading FromRadio until empty, so one notification already causes the
+     * client to collect everything. Ringing on every drain step made a
+     * 28 message stage one fire 28 notifications in under a second, and each
+     * one started another full read loop. That is a notification storm against
+     * the stack rather than a protocol requirement. */
+    if(ring_doorbell) {
+        if(ble_gatt_characteristic_update(service->svc_handle, &service->from_num, service)) {
+            service->stat_fail_num++;
+        }
+        service->stat_doorbells++;
     }
+
     service->stat_publishes++;
 }
 
@@ -323,8 +343,14 @@ static void publish_head(MeshtasticBleService* service) {
  * first message. */
 static void drain_step(MeshtasticBleService* service) {
     bool had_message;
+    bool ring;
 
-    publish_head(service);
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    ring = !service->doorbell_rung && service->pending > 0;
+    if(ring) service->doorbell_rung = true;
+    furi_mutex_release(service->mutex);
+
+    publish_head(service, ring);
 
     furi_mutex_acquire(service->mutex, FuriWaitForever);
     had_message = service->pending > 0;
@@ -336,6 +362,8 @@ static void drain_step(MeshtasticBleService* service) {
     /* Run one step past empty so the drained queue is published as a
      * zero-length read. That empty read is how the phone learns to stop. */
     service->drain_active = had_message || service->pending > 0;
+    /* Armed again for the next batch once this one is fully drained. */
+    if(!service->drain_active) service->doorbell_rung = false;
     furi_mutex_release(service->mutex);
 }
 
@@ -506,6 +534,11 @@ static int32_t ble_worker(void* context) {
         }
         if(!service->worker_running) break;
 
+        /* Proof of life. If the app is wedged and this is not climbing, the
+         * worker is the thing that stopped. If it is climbing while nothing
+         * else moves, the fault is somewhere else entirely. */
+        service->stat_worker_ticks++;
+
         bool due;
         furi_mutex_acquire(service->mutex, FuriWaitForever);
         due = service->drain_active && (int32_t)(furi_get_tick() - service->drain_due_tick) >= 0;
@@ -603,6 +636,8 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
         snap->pending = (uint32_t)service->pending;
         snap->stage = (uint8_t)handshake_stage(&service->handshake);
         snap->publishes = service->stat_publishes;
+        snap->doorbells = service->stat_doorbells;
+        snap->worker_ticks = service->stat_worker_ticks;
         snap->fail_radio = service->stat_fail_radio;
         snap->fail_num = service->stat_fail_num;
         snap->events = service->stat_events;
