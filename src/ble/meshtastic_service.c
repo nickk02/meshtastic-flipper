@@ -6,6 +6,7 @@
 #include <furi_ble/gatt.h>
 #include <furi_ble/profile_interface.h>
 #include <furi_hal_bt.h>
+#include <furi_hal_random.h>
 #include <furi_hal_version.h>
 #include <string.h>
 
@@ -570,6 +571,13 @@ MeshtasticBleService* meshtastic_ble_service_alloc(const MeshConfig* config) {
     service->mutex = furi_mutex_alloc(FuriMutexTypeNormal);
     if(config) service->config = *config;
     handshake_init(&service->handshake, config);
+
+    /* The session passkey guards every state-changing admin request, so it has
+     * to be unpredictable. The handshake layer has no Flipper dependencies and
+     * cannot generate it, so it is seeded here. */
+    uint8_t passkey[PHONE_SESSION_PASSKEY_LEN];
+    furi_hal_random_fill_buf(passkey, sizeof(passkey));
+    handshake_set_session_passkey(&service->handshake, passkey);
 
     const Service_UUID_t service_uuid = {.Service_UUID_128 = UUID_REVERSED_MESH_SERVICE};
     if(!ble_gatt_service_add(

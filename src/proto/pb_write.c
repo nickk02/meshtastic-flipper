@@ -87,3 +87,25 @@ bool pb_write_submessage(PbWriter* w, uint32_t field, const uint8_t* data, size_
     if(!raw_varint(w, len)) return false;
     return raw_bytes(w, data, len);
 }
+
+static bool write_fixed32(PbWriter* w, uint32_t field, uint32_t value) {
+    /* Wire type 5. The four value bytes are little endian, written explicitly
+     * rather than memcpy'd from the host word, so the result does not depend on
+     * this target's byte order. */
+    if(!raw_tag(w, field, 5)) return false;
+    uint8_t bytes[4] = {
+        (uint8_t)(value & 0xFF),
+        (uint8_t)((value >> 8) & 0xFF),
+        (uint8_t)((value >> 16) & 0xFF),
+        (uint8_t)((value >> 24) & 0xFF)};
+    return raw_bytes(w, bytes, sizeof(bytes));
+}
+
+bool pb_write_fixed32_field(PbWriter* w, uint32_t field, uint32_t value) {
+    if(value == 0) return pb_writer_ok(w);
+    return write_fixed32(w, field, value);
+}
+
+bool pb_write_fixed32_field_always(PbWriter* w, uint32_t field, uint32_t value) {
+    return write_fixed32(w, field, value);
+}

@@ -49,6 +49,12 @@ typedef struct {
 
 typedef struct {
     MeshConfig config;
+    /* Seeded by the caller, since randomness is a platform concern and this
+     * layer has no Flipper dependencies. */
+    uint8_t session_passkey[PHONE_SESSION_PASSKEY_LEN];
+    /* Held here rather than on the stack. This runs on the BLE worker thread
+     * and the same reasoning applies as to HandshakeReply. */
+    PhoneAdminRequest admin;
     PhoneIdentity identity;
     HandshakeStage stage;
 } Handshake;
@@ -57,6 +63,13 @@ typedef struct {
  * worker thread and the record is edited from the UI thread, so sharing a
  * pointer would need a lock on every field read. */
 void handshake_init(Handshake* h, const MeshConfig* config);
+
+/* Seed the session passkey the admin exchange hands to the phone.
+ *
+ * The passkey must be unpredictable, and this layer cannot generate it without
+ * taking a platform dependency, so the caller supplies it.
+ * PHONE_SESSION_PASSKEY_LEN bytes. */
+void handshake_set_session_passkey(Handshake* h, const uint8_t* passkey);
 
 /* Handle a ToRadio the phone wrote.
  *

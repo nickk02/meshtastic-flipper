@@ -12,7 +12,27 @@
 #define MYNODEINFO_FIELD_PIO_ENV         13
 
 /* NodeInfo field numbers. mesh.proto, message NodeInfo. */
-#define NODEINFO_FIELD_NUM  1
+#define NODEINFO_FIELD_NUM       1
+/* mesh.proto MeshPacket. from, to and id are fixed32, not varint. */
+#define MESHPACKET_FIELD_FROM    1
+#define MESHPACKET_FIELD_TO      2
+#define MESHPACKET_FIELD_DECODED 4
+#define MESHPACKET_FIELD_ID      6
+
+/* mesh.proto Data. dest, source and request_id are fixed32. */
+#define DATA_FIELD_PORTNUM       1
+#define DATA_FIELD_PAYLOAD       2
+#define DATA_FIELD_WANT_RESPONSE 3
+#define DATA_FIELD_REQUEST_ID    6
+
+/* portnums.proto. */
+#define PORTNUM_ADMIN_APP 6
+
+/* admin.proto AdminMessage. */
+#define ADMIN_FIELD_GET_OWNER_REQUEST  3
+#define ADMIN_FIELD_GET_OWNER_RESPONSE 4
+#define ADMIN_FIELD_SESSION_PASSKEY    101
+
 #define NODEINFO_FIELD_USER 2
 
 /* mesh.proto, message DeviceMetadata. */
@@ -152,6 +172,114 @@ static bool read_varint(const uint8_t* buf, size_t len, size_t* pos, uint64_t* o
         shift += 7;
     }
     return false;
+}
+
+/* Finds one field in a message and stops at the end of it.
+ *
+ * Length delimited fields report through ptr and plen, varint and fixed32
+ * through val. Passing NULL for the pair that does not apply means a field of
+ * the wrong wire type is treated as absent rather than misread, which matters
+ * because several Meshtastic fields that look like integers are fixed32. */
+static bool scan_field(
+    const uint8_t* buf,
+    size_t len,
+    uint32_t want,
+    const uint8_t** ptr,
+    size_t* plen,
+    uint64_t* val) {
+    size_t pos = 0;
+    bool found = false;
+
+    if(buf == NULL) return false;
+
+    while(pos < len) {
+        uint64_t tag;
+        if(!read_varint(buf, len, &pos, &tag)) return false;
+
+        uint32_t field = (uint32_t)(tag >> 3);
+        uint8_t wire = (uint8_t)(tag & 0x07);
+        if(field == 0) return false;
+
+        switch(wire) {
+        case 0: {
+            uint64_t v;
+            if(!read_varint(buf, len, &pos, &v)) return false;
+            if(field == want && val != NULL) {
+                *val = v;
+                found = true;
+            }
+            break;
+        }
+        case 5:
+            if(len - pos < 4) return false;
+            if(field == want && val != NULL) {
+                *val = (uint32_t)buf[pos] | ((uint32_t)buf[pos + 1] << 8) |
+                       ((uint32_t)buf[pos + 2] << 16) | ((uint32_t)buf[pos + 3] << 24);
+                found = true;
+            }
+            pos += 4;
+            break;
+        case 1:
+            if(len - pos < 8) return false;
+            pos += 8;
+            break;
+        case 2: {
+            uint64_t size;
+            if(!read_varint(buf, len, &pos, &size)) return false;
+            if(size > (uint64_t)(len - pos)) return false;
+            if(field == want && ptr != NULL) {
+                *ptr = buf + pos;
+                *plen = (size_t)size;
+                found = true;
+            }
+            pos += (size_t)size;
+            break;
+        }
+        default:
+            return false;
+        }
+    }
+
+    return found;
+}
+
+bool phone_decode_get_owner_request(const uint8_t* buf, size_t len, PhoneAdminRequest* out) {
+    const uint8_t* packet = NULL;
+    const uint8_t* data = NULL;
+    const uint8_t* payload = NULL;
+    size_t packet_len = 0;
+    size_t data_len = 0;
+    size_t payload_len = 0;
+    uint64_t value = 0;
+
+    if(out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+
+    /* ToRadio.packet -> MeshPacket.decoded -> Data. An admin request that is
+     * encrypted rather than decoded is not for us to answer. */
+    if(!scan_field(buf, len, TORADIO_FIELD_PACKET, &packet, &packet_len, NULL)) return false;
+    if(!scan_field(packet, packet_len, MESHPACKET_FIELD_DECODED, &data, &data_len, NULL))
+        return false;
+
+    if(!scan_field(data, data_len, DATA_FIELD_PORTNUM, NULL, NULL, &value)) return false;
+    if(value != PORTNUM_ADMIN_APP) return false;
+
+    if(!scan_field(data, data_len, DATA_FIELD_PAYLOAD, &payload, &payload_len, NULL)) return false;
+
+    /* get_owner_request is a bool. Protobuf omits false, so an absent field is
+     * a different request, not this one. */
+    if(!scan_field(payload, payload_len, ADMIN_FIELD_GET_OWNER_REQUEST, NULL, NULL, &value))
+        return false;
+    if(value == 0) return false;
+
+    if(scan_field(packet, packet_len, MESHPACKET_FIELD_ID, NULL, NULL, &value)) {
+        out->packet_id = (uint32_t)value;
+    }
+    if(scan_field(packet, packet_len, MESHPACKET_FIELD_FROM, NULL, NULL, &value)) {
+        out->from = (uint32_t)value;
+    }
+
+    return true;
 }
 
 bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce) {
@@ -385,6 +513,57 @@ size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_l
     if(!pb_writer_ok(&msg)) return 0;
 
     return pb_writer_len(&msg);
+}
+
+size_t phone_encode_get_owner_response(
+    const PhoneIdentity* id,
+    const PhoneAdminRequest* request,
+    const uint8_t* passkey,
+    uint8_t* out,
+    size_t out_len) {
+    uint8_t user[96];
+    uint8_t admin[128];
+    uint8_t data[160];
+    uint8_t packet[192];
+    PbWriter w;
+
+    if(id == NULL || request == NULL || passkey == NULL || out == NULL) return 0;
+
+    /* The User this device reports as its owner. Same shape as the one inside
+     * NodeInfo, but AdminMessage carries it bare. */
+    pb_writer_init(&w, user, sizeof(user));
+    pb_write_string_field(&w, USER_FIELD_ID, id->id);
+    pb_write_string_field(&w, USER_FIELD_LONG_NAME, id->long_name);
+    pb_write_string_field(&w, USER_FIELD_SHORT_NAME, id->short_name);
+    pb_write_varint_field(&w, USER_FIELD_HW_MODEL, id->hw_model);
+    if(!pb_writer_ok(&w)) return 0;
+    size_t user_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, admin, sizeof(admin));
+    pb_write_submessage(&w, ADMIN_FIELD_GET_OWNER_RESPONSE, user, user_len);
+    pb_write_bytes_field(&w, ADMIN_FIELD_SESSION_PASSKEY, passkey, PHONE_SESSION_PASSKEY_LEN);
+    if(!pb_writer_ok(&w)) return 0;
+    size_t admin_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, DATA_FIELD_PORTNUM, PORTNUM_ADMIN_APP);
+    pb_write_bytes_field(&w, DATA_FIELD_PAYLOAD, admin, admin_len);
+    /* request_id is what lets the client match this to the request it sent.
+     * fixed32, so a varint here would be silently discarded. */
+    pb_write_fixed32_field(&w, DATA_FIELD_REQUEST_ID, request->packet_id);
+    if(!pb_writer_ok(&w)) return 0;
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_FROM, id->node_num);
+    pb_write_fixed32_field(&w, MESHPACKET_FIELD_TO, request->from);
+    pb_write_submessage(&w, MESHPACKET_FIELD_DECODED, data, data_len);
+    /* Reusing the request id as the packet id keeps this device from having to
+     * invent one. The client matches on request_id, not on this. */
+    pb_write_fixed32_field(&w, MESHPACKET_FIELD_ID, request->packet_id);
+    if(!pb_writer_ok(&w)) return 0;
+
+    return phone_encode_packet(packet, pb_writer_len(&w), out, out_len);
 }
 
 void phone_identity_from_config(const MeshConfig* config, PhoneIdentity* out) {

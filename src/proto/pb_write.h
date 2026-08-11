@@ -40,6 +40,15 @@ bool pb_write_varint_field_always(PbWriter* w, uint32_t field, uint64_t value);
 /* Writes nothing when len is 0, for the same reason. */
 bool pb_write_bytes_field(PbWriter* w, uint32_t field, const uint8_t* data, size_t len);
 
+/* fixed32, wire type 5, little endian.
+ *
+ * Several Meshtastic fields that look like plain integers are declared fixed32:
+ * MeshPacket.from, .to, .id, and Data.dest, .source, .request_id. Writing them
+ * as varints produces a message the client discards without complaint, so the
+ * two are kept as separate calls rather than one that guesses. */
+bool pb_write_fixed32_field(PbWriter* w, uint32_t field, uint32_t value);
+bool pb_write_fixed32_field_always(PbWriter* w, uint32_t field, uint32_t value);
+
 /* Writes nothing for NULL or an empty string. */
 bool pb_write_string_field(PbWriter* w, uint32_t field, const char* str);
 

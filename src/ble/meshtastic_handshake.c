@@ -8,6 +8,8 @@
 void handshake_init(Handshake* h, const MeshConfig* config) {
     if(h == NULL) return;
     memset(h, 0, sizeof(*h));
+    memset(h->session_passkey, 0, sizeof(h->session_passkey));
+
     if(config != NULL) {
         h->config = *config;
         /* The wire identity is derived here rather than passed in, so there is
@@ -16,6 +18,11 @@ void handshake_init(Handshake* h, const MeshConfig* config) {
         phone_identity_from_config(config, &h->identity);
     }
     h->stage = HandshakeIdle;
+}
+
+void handshake_set_session_passkey(Handshake* h, const uint8_t* passkey) {
+    if(h == NULL || passkey == NULL) return;
+    memcpy(h->session_passkey, passkey, PHONE_SESSION_PASSKEY_LEN);
 }
 
 void handshake_reset(Handshake* h) {
@@ -49,6 +56,23 @@ bool handshake_handle_to_radio(
     if(h == NULL || reply == NULL) return false;
 
     reply->count = 0;
+
+    /* An admin get_owner_request is answered whatever stage we are in, and
+     * before the want_config parse, since it is not a want_config at all.
+     *
+     * handshake-fsm.md: the client does not reach Ready, meaning Connected,
+     * until get_owner_response lands and a session_passkey is latched. Both
+     * config stages completing and then silence is what makes it time out and
+     * reconnect in a loop. */
+    if(phone_decode_get_owner_request(data, len, &h->admin)) {
+        written = phone_encode_get_owner_response(
+            &h->identity,
+            &h->admin,
+            h->session_passkey,
+            reply->messages[reply->count].data,
+            HANDSHAKE_MAX_MESSAGE);
+        return push(reply, written);
+    }
 
     if(!phone_decode_want_config_id(data, len, &nonce)) return false;
 
