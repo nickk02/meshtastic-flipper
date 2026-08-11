@@ -26,6 +26,22 @@ static int32_t radio_thread(void* context) {
 
     uint8_t key[MESH_PSK_LEN];
     uint8_t channel_hash;
+
+    /* Nothing to poll if the radio never answered.
+     *
+     * This used to poll regardless, which means driving SPI transactions at a
+     * device that is not present, continuously, for as long as the app is open.
+     * A poll that returns immediately instead of honouring its timeout turns
+     * this loop into a spin that starves the GUI thread, and the external SPI
+     * bus is shared with the internal CC1101 and NFC.
+     *
+     * Every Flipper this has run on so far has no SX1262 attached, so this path
+     * has been the normal one rather than the exception. */
+    if(!app->source_started) {
+        FURI_LOG_I("MeshApp", "no radio, receive thread not started");
+        return 0;
+    }
+
     if(!mesh_channel_expand_psk(PRIMARY_PSK_INDEX, key)) return 0;
     channel_hash = mesh_channel_hash(PRIMARY_CHANNEL_NAME, key, MESH_PSK_LEN);
 
