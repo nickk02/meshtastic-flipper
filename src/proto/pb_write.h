@@ -52,6 +52,15 @@ bool pb_write_fixed32_field_always(PbWriter* w, uint32_t field, uint32_t value);
 /* Writes nothing for NULL or an empty string. */
 bool pb_write_string_field(PbWriter* w, uint32_t field, const char* str);
 
+/* Writes the field even when the value is empty.
+ *
+ * pb_write_string_field omits an empty string, which is correct for protobuf
+ * defaults and wrong when the field is a oneof member. An empty
+ * get_ringtone_response IS the answer for a device with no ringtone, and
+ * omitting it leaves an AdminMessage with no payload_variant set, which is not
+ * an answer to anything. */
+bool pb_write_string_field_always(PbWriter* w, uint32_t field, const char* str);
+
 /* Nested message, already encoded by the caller. Written even when len is 0,
  * because an empty submessage is distinguishable from an absent one and the
  * client may care. */

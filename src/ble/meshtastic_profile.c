@@ -126,6 +126,19 @@ static void profile_get_gap_config(GapConfig* config, FuriHalBleProfileParams pa
      * worth less than being visible: the app replaces it with the node's real
      * name from NodeInfo as soon as it connects. */
     config->adv_name[0] = AD_TYPE_COMPLETE_LOCAL_NAME;
+    /* Four characters, deliberately.
+     *
+     * An eight character name was tried and the stack refused the whole
+     * advertisement, so the device never became discoverable at all:
+     *
+     *   [E][BleGap] set_non_discoverable failed 12
+     *   [E][BleGap] set_discoverable failed 146
+     *
+     * The note above says eight fills the budget exactly with no margin. The
+     * margin turns out to be needed. A node suffix here is still worth having,
+     * since two Flippers currently advertise identically, but it needs its own
+     * change with discovery confirmed on hardware rather than inferred from a
+     * byte count. */
     snprintf(config->adv_name + 1, sizeof(config->adv_name) - 1, "Mesh");
 
     config->conn_param.conn_int_min = 0x18; /* 30 ms */
