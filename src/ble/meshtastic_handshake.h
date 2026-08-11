@@ -32,7 +32,9 @@ typedef enum {
  * marker. */
 /* my_info, own node_info, metadata, one channel, ten config variants,
  * thirteen module config variants, config_complete. */
-#define HANDSHAKE_MAX_REPLIES 28
+/* my_info, deviceuiConfig, own node_info, metadata, eight channel slots,
+ * ten config variants, thirteen module config variants, config_complete. */
+#define HANDSHAKE_MAX_REPLIES 36
 #define HANDSHAKE_MAX_MESSAGE 192
 
 typedef struct {

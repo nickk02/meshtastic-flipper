@@ -93,44 +93,39 @@ TEST(test_stage_one_follows_the_firmware_order) {
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
     /* my_info, own node_info, metadata, one channel, ten config variants,
      * thirteen module config variants, config_complete. */
-    ASSERT_EQ_INT(reply.count, 28);
+    /* my_info, deviceuiConfig, own node_info, metadata, eight channel slots,
+     * ten config variants, thirteen module config variants, config_complete. */
+    ASSERT_EQ_INT(reply.count, 36);
 
-    /* my_info, field 3. */
-    ASSERT_TRUE(reply.messages[0].len > 0);
     ASSERT_EQ_INT(reply.messages[0].data[0] >> 3, FROMRADIO_FIELD_MY_INFO);
+    ASSERT_EQ_INT(reply.messages[1].data[0] >> 3, FROMRADIO_FIELD_DEVICEUI);
+    /* This device's own NodeInfo carries its name. */
+    ASSERT_EQ_INT(reply.messages[2].data[0] >> 3, FROMRADIO_FIELD_NODE_INFO);
+    /* metadata, the firmware version the app checks. */
+    ASSERT_EQ_INT(reply.messages[3].data[0] >> 3, FROMRADIO_FIELD_METADATA);
 
-    /* This device's own NodeInfo, field 4. This is the one that carries the
-     * name, and the one that was missing. */
-    ASSERT_TRUE(reply.messages[1].len > 0);
-    ASSERT_EQ_INT(reply.messages[1].data[0] >> 3, FROMRADIO_FIELD_NODE_INFO);
+    /* All eight channel slots. A client that gets one channel is still waiting
+     * for seven more, which is why a complete looking stage one was refused. */
+    for(size_t i = 4; i < 4 + PHONE_CHANNEL_SLOTS; i++) {
+        ASSERT_TRUE(reply.messages[i].len > 0);
+        ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_CHANNEL);
+    }
 
-    /* metadata, field 13. The app reads firmware_version from it. */
-    ASSERT_TRUE(reply.messages[2].len > 0);
-    ASSERT_EQ_INT(reply.messages[2].data[0] >> 3, FROMRADIO_FIELD_METADATA);
-
-    /* channel, field 10. Without it the app has a node on no channel. */
-    ASSERT_TRUE(reply.messages[3].len > 0);
-    ASSERT_EQ_INT(reply.messages[3].data[0] >> 3, FROMRADIO_FIELD_CHANNEL);
-
-    /* Ten config variants, field 5. Sending only the lora one is what made the
-     * client abandon stage one and reconnect. */
-    for(size_t i = 4; i < 4 + PHONE_CONFIG_VARIANTS; i++) {
+    for(size_t i = 12; i < 12 + PHONE_CONFIG_VARIANTS; i++) {
         ASSERT_TRUE(reply.messages[i].len > 0);
         ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_CONFIG);
     }
 
-    /* Thirteen module config variants, field 9. */
-    for(size_t i = 14; i < 14 + PHONE_MODULECONFIG_VARIANTS; i++) {
+    for(size_t i = 22; i < 22 + PHONE_MODULECONFIG_VARIANTS; i++) {
         ASSERT_TRUE(reply.messages[i].len > 0);
         ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_MODULECONFIG);
     }
 
-    /* config_complete_id, field 7, carrying the nonce that was asked for.
-     * PhoneAPI.cpp calls this the sentinel: it is what ends the stage, so it
-     * must be last or the client sees a truncated sequence. */
+    /* config_complete_id last. PhoneAPI.cpp calls it the sentinel: it ends the
+     * stage, so anything after it is a truncated sequence to the client. */
     ASSERT_TRUE(has_varint_field(
-        reply.messages[27].data,
-        reply.messages[27].len,
+        reply.messages[35].data,
+        reply.messages[35].len,
         FROMRADIO_FIELD_CONFIG_COMPLETE_ID,
         &value));
     ASSERT_EQ_INT(value, PHONE_NONCE_CONFIG);
@@ -247,9 +242,9 @@ TEST(test_stages_may_repeat) {
 
     handshake_init(&h, &id);
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 28);
+    ASSERT_EQ_INT(reply.count, 36);
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 28);
+    ASSERT_EQ_INT(reply.count, 36);
 }
 
 TEST(test_tolerates_null) {

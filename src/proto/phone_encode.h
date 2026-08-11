@@ -41,6 +41,7 @@
 #define FROMRADIO_FIELD_CHANNEL            10
 #define FROMRADIO_FIELD_CONFIG             5
 #define FROMRADIO_FIELD_METADATA           13
+#define FROMRADIO_FIELD_DEVICEUI           17
 
 /* ToRadio field numbers. mesh.proto, message ToRadio. */
 #define TORADIO_FIELD_PACKET         1
@@ -131,6 +132,11 @@ size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_l
 /* Config and ModuleConfig variant counts the firmware emits during stage 1.
  * config.proto Config has 10 variants, module_config.proto ModuleConfig has 17
  * but PhoneAPI.cpp sends the first 13. */
+/* Channel slots the firmware walks during STATE_SEND_CHANNELS. Every slot is
+ * sent, not just the ones in use. deviceonly.options pins the array:
+ * "*ChannelFile.channels max_count:8". */
+#define PHONE_CHANNEL_SLOTS 8
+
 #define PHONE_CONFIG_VARIANTS       10
 #define PHONE_MODULECONFIG_VARIANTS 13
 
@@ -149,6 +155,18 @@ size_t phone_encode_config_variant(
     uint8_t* out,
     size_t out_len);
 size_t phone_encode_moduleconfig_variant(uint32_t variant, uint8_t* out, size_t out_len);
+
+/* FromRadio { channel { index: N } } for an unused slot.
+ *
+ * Role is left out, since Channel.Role.DISABLED is 0 and protobuf omits
+ * defaults. The client walks every slot, so an absent slot is not the same as
+ * a disabled one. */
+size_t phone_encode_empty_channel(uint32_t index, uint8_t* out, size_t out_len);
+
+/* FromRadio { deviceuiConfig {} }. The spec marks it optional, but the client
+ * is documented to assume the sequence, and optional to the firmware is not
+ * evidence about what the client tolerates. */
+size_t phone_encode_device_ui(uint8_t* out, size_t out_len);
 
 /* FromRadio { packet { ... } }, wrapping an already-built MeshPacket. */
 size_t phone_encode_packet(
