@@ -126,7 +126,16 @@ static void profile_get_gap_config(GapConfig* config, FuriHalBleProfileParams pa
      * worth less than being visible: the app replaces it with the node's real
      * name from NodeInfo as soon as it connects. */
     config->adv_name[0] = AD_TYPE_COMPLETE_LOCAL_NAME;
-    snprintf(config->adv_name + 1, sizeof(config->adv_name) - 1, "Mesh");
+    /* Eight characters exactly, the whole budget. "Mesh" alone told two
+     * Flippers apart not at all and said nothing about which node it was, so
+     * the last four hex digits of the node number go on the end. That is the
+     * same suffix the node id and the default long name carry, so the name in
+     * the scan list matches the node in the app. */
+    snprintf(
+        config->adv_name + 1,
+        sizeof(config->adv_name) - 1,
+        "Mesh%04lx",
+        (unsigned long)(pending_config_set ? (pending_config.owner.node_num & 0xFFFFu) : 0));
 
     config->conn_param.conn_int_min = 0x18; /* 30 ms */
     config->conn_param.conn_int_max = 0x24; /* 45 ms */

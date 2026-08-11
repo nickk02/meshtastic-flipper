@@ -697,7 +697,11 @@ size_t phone_encode_admin_reply(
                              ADMIN_GET_CANNED_RESPONSE :
                              ADMIN_GET_RINGTONE_RESPONSE;
         pb_writer_init(&w, admin, sizeof(admin));
-        pb_write_string_field(&w, field, "");
+        /* Written even though it is empty. The response is a oneof member, and
+         * omitting it produces an AdminMessage with nothing set, which the
+         * client cannot match to its request. An empty string is the honest
+         * answer for a device with no canned messages and no ringtone. */
+        pb_write_string_field_always(&w, field, "");
         if(passkey != NULL) {
             pb_write_bytes_field(
                 &w, ADMIN_FIELD_SESSION_PASSKEY, passkey, PHONE_SESSION_PASSKEY_LEN);

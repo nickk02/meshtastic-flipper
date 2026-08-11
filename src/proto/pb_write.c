@@ -78,6 +78,14 @@ bool pb_write_string_field(PbWriter* w, uint32_t field, const char* str) {
     return pb_write_bytes_field(w, field, (const uint8_t*)str, strlen(str));
 }
 
+bool pb_write_string_field_always(PbWriter* w, uint32_t field, const char* str) {
+    size_t len = str == NULL ? 0 : strlen(str);
+    if(!raw_tag(w, field, WIRE_LEN)) return false;
+    if(!raw_varint(w, len)) return false;
+    if(len == 0) return pb_writer_ok(w);
+    return raw_bytes(w, (const uint8_t*)str, len);
+}
+
 bool pb_write_submessage(PbWriter* w, uint32_t field, const uint8_t* data, size_t len) {
     if(len > 0 && data == NULL) {
         w->ok = false;
