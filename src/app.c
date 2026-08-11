@@ -21,6 +21,29 @@ static void input_callback(InputEvent* event, void* context) {
     furi_message_queue_put(queue, event, FuriWaitForever);
 }
 
+/* Answers the loader's exit request.
+ *
+ * Without this the loader reports "Application has to be closed manually" and
+ * refuses to replace a running app, so every install over USB needs someone to
+ * physically back out of it first. base.h defines FuriSignalExit as the
+ * graceful-exit request, and returning true claims it.
+ *
+ * Runs on the loader's thread, so it only sets a flag and posts a wake-up. The
+ * app's own loop does the shutting down. */
+static bool signal_callback(uint32_t signal, void* arg, void* context) {
+    MeshApp* app = context;
+    UNUSED(arg);
+
+    if(signal != FuriSignalExit) return false;
+
+    app->running = false;
+    /* The main loop is parked on its input queue. Posting a back press wakes it
+     * immediately rather than leaving it to time out. */
+    InputEvent exit_event = {.key = InputKeyBack, .type = InputTypeShort};
+    furi_message_queue_put(app->input_queue, &exit_event, 0);
+    return true;
+}
+
 /* Redraw cadence when nothing is happening. Fast enough that the BLE counters
  * look live during a connection, slow enough that an idle app is not
  * repainting the screen for no reason. */
@@ -131,6 +154,8 @@ MeshApp* mesh_app_alloc(void) {
     app->view_port = view_port_alloc();
     view_port_draw_callback_set(app->view_port, app_view_draw, app);
     view_port_input_callback_set(app->view_port, input_callback, app->input_queue);
+
+    furi_thread_set_signal_callback(furi_thread_get_current(), signal_callback, app);
 
     app->gui = furi_record_open(RECORD_GUI);
     gui_add_view_port(app->gui, app->view_port, GuiLayerFullscreen);
