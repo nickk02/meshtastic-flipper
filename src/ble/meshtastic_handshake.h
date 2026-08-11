@@ -30,7 +30,9 @@ typedef enum {
 
 /* Up to two messages are produced per request: a body, then the completion
  * marker. */
-#define HANDSHAKE_MAX_REPLIES 6
+/* my_info, own node_info, metadata, one channel, ten config variants,
+ * thirteen module config variants, config_complete. */
+#define HANDSHAKE_MAX_REPLIES 28
 #define HANDSHAKE_MAX_MESSAGE 192
 
 typedef struct {

@@ -1,5 +1,8 @@
 #include "src/ble/meshtastic_handshake.h"
 
+/* config.proto, Config.lora. */
+#define CONFIG_VARIANT_LORA 6
+
 #include <string.h>
 
 void handshake_init(Handshake* h, const MeshConfig* config) {
@@ -76,9 +79,28 @@ bool handshake_handle_to_radio(
             HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
 
-        written = phone_encode_lora_config(
-            h->config.lora.channel_num, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
-        if(!push(reply, written)) return false;
+        /* Every Config variant, in field order. LoRa is field 6 and carries
+         * real settings; the rest are empty, meaning all defaults, which is the
+         * truthful answer for a device that does not implement them. Skipping
+         * them is what made the client abandon stage one and reconnect. */
+        for(uint32_t variant = 1; variant <= PHONE_CONFIG_VARIANTS; variant++) {
+            if(variant == CONFIG_VARIANT_LORA) {
+                written = phone_encode_lora_config(
+                    h->config.lora.channel_num,
+                    reply->messages[reply->count].data,
+                    HANDSHAKE_MAX_MESSAGE);
+            } else {
+                written = phone_encode_config_variant(
+                    variant, NULL, 0, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            }
+            if(!push(reply, written)) return false;
+        }
+
+        for(uint32_t variant = 1; variant <= PHONE_MODULECONFIG_VARIANTS; variant++) {
+            written = phone_encode_moduleconfig_variant(
+                variant, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            if(!push(reply, written)) return false;
+        }
 
         written = phone_encode_config_complete(
             PHONE_NONCE_CONFIG, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);

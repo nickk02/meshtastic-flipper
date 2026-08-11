@@ -37,6 +37,7 @@
 #define FROMRADIO_FIELD_MY_INFO            3
 #define FROMRADIO_FIELD_NODE_INFO          4
 #define FROMRADIO_FIELD_CONFIG_COMPLETE_ID 7
+#define FROMRADIO_FIELD_MODULECONFIG       9
 #define FROMRADIO_FIELD_CHANNEL            10
 #define FROMRADIO_FIELD_CONFIG             5
 #define FROMRADIO_FIELD_METADATA           13
@@ -126,6 +127,28 @@ size_t
  * cannot show or change what the radio is doing. config.proto, message
  * LoRaConfig. */
 size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_len);
+
+/* Config and ModuleConfig variant counts the firmware emits during stage 1.
+ * config.proto Config has 10 variants, module_config.proto ModuleConfig has 17
+ * but PhoneAPI.cpp sends the first 13. */
+#define PHONE_CONFIG_VARIANTS       10
+#define PHONE_MODULECONFIG_VARIANTS 13
+
+/* FromRadio { config { <variant>: {} } } and the ModuleConfig equivalent.
+ *
+ * An empty sub-message is a real answer, not a placeholder: in protobuf it
+ * means every field is at its default. That is the truthful thing to say about
+ * a module this device does not implement, and the client is documented to
+ * assume the whole sequence arrives, so saying nothing is not an option.
+ *
+ * variant is the field number inside Config or ModuleConfig. */
+size_t phone_encode_config_variant(
+    uint32_t variant,
+    const uint8_t* body,
+    size_t body_len,
+    uint8_t* out,
+    size_t out_len);
+size_t phone_encode_moduleconfig_variant(uint32_t variant, uint8_t* out, size_t out_len);
 
 /* FromRadio { packet { ... } }, wrapping an already-built MeshPacket. */
 size_t phone_encode_packet(
