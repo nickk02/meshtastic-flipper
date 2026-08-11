@@ -279,6 +279,48 @@ size_t phone_encode_primary_channel(
     return pb_writer_len(&msg);
 }
 
+static size_t encode_variant(
+    uint32_t outer,
+    uint32_t variant,
+    const uint8_t* body,
+    size_t body_len,
+    uint8_t* out,
+    size_t out_len) {
+    uint8_t wrapper[96];
+    PbWriter w;
+    PbWriter msg;
+    static const uint8_t nothing = 0;
+
+    if(out == NULL) return 0;
+    if(body == NULL) {
+        body = &nothing;
+        body_len = 0;
+    }
+
+    pb_writer_init(&w, wrapper, sizeof(wrapper));
+    pb_write_submessage(&w, variant, body, body_len);
+    if(!pb_writer_ok(&w)) return 0;
+
+    pb_writer_init(&msg, out, out_len);
+    pb_write_submessage(&msg, outer, wrapper, pb_writer_len(&w));
+    if(!pb_writer_ok(&msg)) return 0;
+
+    return pb_writer_len(&msg);
+}
+
+size_t phone_encode_config_variant(
+    uint32_t variant,
+    const uint8_t* body,
+    size_t body_len,
+    uint8_t* out,
+    size_t out_len) {
+    return encode_variant(FROMRADIO_FIELD_CONFIG, variant, body, body_len, out, out_len);
+}
+
+size_t phone_encode_moduleconfig_variant(uint32_t variant, uint8_t* out, size_t out_len) {
+    return encode_variant(FROMRADIO_FIELD_MODULECONFIG, variant, NULL, 0, out, out_len);
+}
+
 size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_len) {
     uint8_t lora[64];
     uint8_t body[96];
