@@ -433,7 +433,11 @@ void meshtastic_ble_service_set_callback(
  *
  * Every failure on this project so far has been "the phone sent something and
  * the device silently did nothing with it". The bytes are the only thing that
- * distinguishes a message we ignored on purpose from one we failed to parse. */
+ * distinguishes a message we ignored on purpose from one we failed to parse.
+ *
+ * 40 bytes rather than 16. Sixteen stopped inside the MeshPacket header, one
+ * byte short of the Data payload, which is exactly where the interesting part
+ * of an admin request begins. */
 static void hex_prefix(const uint8_t* data, size_t len, char* out, size_t out_len) {
     static const char digits[] = "0123456789abcdef";
     size_t n = 0;
@@ -450,7 +454,7 @@ static void hex_prefix(const uint8_t* data, size_t len, char* out, size_t out_le
 static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, size_t len) {
     uint32_t nonce = 0;
     bool understood = false;
-    char hex[3 * 16 + 1];
+    char hex[3 * 40 + 1];
 
     hex_prefix(data, len, hex, sizeof(hex));
 
@@ -488,12 +492,21 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
      * stall on this project, and the counters cannot show it: they only say a
      * write arrived, not that it went unanswered. */
     if(!understood) {
+        /* Say where the admin walk gave up. "Not understood" was equally true
+         * of a heartbeat, a want_config and a malformed admin request, so a
+         * packet arriving with portnum 6 and going unanswered looked identical
+         * to one we had no business answering. */
+        PhoneAdminReason why = PhoneAdminOk;
+        PhoneAdminRequest probe;
+        phone_decode_get_owner_request_why(data, len, &probe, &why);
+
         FURI_LOG_W(
             TAG,
-            "ToRadio not understood: tag=%u len=%u %s",
+            "ToRadio not understood: tag=%u len=%u admin=%s",
             len > 0 ? (unsigned)(data[0] >> 3) : 0,
             (unsigned)len,
-            hex);
+            phone_admin_reason_name(why));
+        FURI_LOG_W(TAG, "  bytes: %s", hex);
     }
 
     if(count > 0) FURI_LOG_I(TAG, "queueing %u replies", (unsigned)count);

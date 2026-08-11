@@ -193,11 +193,37 @@ typedef struct {
     uint32_t from; /* MeshPacket.from, the reply's destination */
 } PhoneAdminRequest;
 
+/* Why an admin decode gave up.
+ *
+ * A bare false says a ToRadio was not a get_owner_request, which is true of
+ * every heartbeat and every want_config too. It cannot distinguish "not an
+ * admin message" from "an admin message this code failed to walk", and those
+ * are the two possibilities worth telling apart on a device that is refusing
+ * to connect. */
+typedef enum {
+    PhoneAdminOk = 0,
+    PhoneAdminNoPacket, /* ToRadio carried no packet */
+    PhoneAdminNoDecoded, /* MeshPacket had no decoded Data, so encrypted */
+    PhoneAdminNoPortnum,
+    PhoneAdminWrongPortnum,
+    PhoneAdminNoPayload,
+    PhoneAdminNotGetOwner, /* admin message, but a different request */
+} PhoneAdminReason;
+
+const char* phone_admin_reason_name(PhoneAdminReason reason);
+
 /* True when the ToRadio holds an AdminMessage.get_owner_request.
  *
  * The phone will not report Connected until this is answered, so a request that
  * is silently not recognised looks exactly like a device that has hung. */
 bool phone_decode_get_owner_request(const uint8_t* buf, size_t len, PhoneAdminRequest* out);
+
+/* Same, reporting where it gave up. */
+bool phone_decode_get_owner_request_why(
+    const uint8_t* buf,
+    size_t len,
+    PhoneAdminRequest* out,
+    PhoneAdminReason* reason);
 
 /* FromRadio { packet { decoded { portnum: ADMIN_APP, payload: AdminMessage {
  *   get_owner_response, session_passkey } } } }.
