@@ -229,6 +229,7 @@ size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_
 }
 
 /* channel.proto, message Channel and message ChannelSettings. */
+#define CHANNEL_FIELD_INDEX         1
 #define CHANNEL_FIELD_SETTINGS      2
 #define CHANNEL_FIELD_ROLE          3
 #define CHANNEL_SETTINGS_FIELD_PSK  2
@@ -319,6 +320,37 @@ size_t phone_encode_config_variant(
 
 size_t phone_encode_moduleconfig_variant(uint32_t variant, uint8_t* out, size_t out_len) {
     return encode_variant(FROMRADIO_FIELD_MODULECONFIG, variant, NULL, 0, out, out_len);
+}
+
+size_t phone_encode_empty_channel(uint32_t index, uint8_t* out, size_t out_len) {
+    uint8_t body[32];
+    PbWriter body_writer;
+    PbWriter msg;
+
+    if(out == NULL) return 0;
+
+    pb_writer_init(&body_writer, body, sizeof(body));
+    pb_write_varint_field(&body_writer, CHANNEL_FIELD_INDEX, index);
+    if(!pb_writer_ok(&body_writer)) return 0;
+
+    pb_writer_init(&msg, out, out_len);
+    pb_write_submessage(&msg, FROMRADIO_FIELD_CHANNEL, body, pb_writer_len(&body_writer));
+    if(!pb_writer_ok(&msg)) return 0;
+
+    return pb_writer_len(&msg);
+}
+
+size_t phone_encode_device_ui(uint8_t* out, size_t out_len) {
+    static const uint8_t nothing = 0;
+    PbWriter msg;
+
+    if(out == NULL) return 0;
+
+    pb_writer_init(&msg, out, out_len);
+    pb_write_submessage(&msg, FROMRADIO_FIELD_DEVICEUI, &nothing, 0);
+    if(!pb_writer_ok(&msg)) return 0;
+
+    return pb_writer_len(&msg);
 }
 
 size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_len) {

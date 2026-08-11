@@ -64,6 +64,10 @@ bool handshake_handle_to_radio(
             &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
 
+        written =
+            phone_encode_device_ui(reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+        if(!push(reply, written)) return false;
+
         written = phone_encode_node_info(
             &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
@@ -72,12 +76,23 @@ bool handshake_handle_to_radio(
             &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
         if(!push(reply, written)) return false;
 
-        written = phone_encode_primary_channel(
-            h->config.channel.name,
-            h->config.channel.psk_index,
-            reply->messages[reply->count].data,
-            HANDSHAKE_MAX_MESSAGE);
-        if(!push(reply, written)) return false;
+        /* Every channel slot, not just the one in use. STATE_SEND_CHANNELS
+         * walks the whole table before moving on, so a client that gets one
+         * channel is still waiting for seven more. Sending only the primary is
+         * why a complete looking stage one was still refused. */
+        for(uint32_t slot = 0; slot < PHONE_CHANNEL_SLOTS; slot++) {
+            if(slot == 0) {
+                written = phone_encode_primary_channel(
+                    h->config.channel.name,
+                    h->config.channel.psk_index,
+                    reply->messages[reply->count].data,
+                    HANDSHAKE_MAX_MESSAGE);
+            } else {
+                written = phone_encode_empty_channel(
+                    slot, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            }
+            if(!push(reply, written)) return false;
+        }
 
         /* Every Config variant, in field order. LoRa is field 6 and carries
          * real settings; the rest are empty, meaning all defaults, which is the

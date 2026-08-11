@@ -35,7 +35,7 @@
 /* Deep enough to hold a whole stage one reply. The handshake queues the entire
  * sequence at once, and a queue that drops the tail sends the client a
  * truncated sequence it is documented to assume the shape of. */
-#define QUEUE_DEPTH 32
+#define QUEUE_DEPTH 40
 
 /* Declared value length for FromRadio, and the largest message the queue will
  * accept. The callback's length probe becomes Char_Value_Length in
