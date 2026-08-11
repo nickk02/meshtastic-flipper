@@ -353,13 +353,17 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
      * means that characteristic was never added, so the phone cannot see it and
      * every update against it fails. Ev is GATT events reaching our handler; a
      * zero there means the dispatcher never calls us at all. */
+    /* Wk is the worker loop's proof of life. If the app is wedged and Wk is
+     * not climbing between two looks, the worker stopped and the fault is
+     * inside it. If Wk climbs while nothing else moves, the worker is fine and
+     * the fault is elsewhere. Dr counts FromNum notifications, which should be
+     * about one per batch rather than one per message. */
     snprintf(
         line,
         sizeof(line),
-        "T:%u R:%u N:%u Ev:%lu",
-        (unsigned)st.to_radio_handle,
-        (unsigned)st.from_radio_handle,
-        (unsigned)st.from_num_handle,
+        "Wk:%lu Db:%lu Ev:%lu",
+        (unsigned long)st.worker_ticks,
+        (unsigned long)st.doorbells,
         (unsigned long)st.events);
     canvas_draw_str(canvas, 2, BODY_TOP + 3 * ROW_H, line);
 }

@@ -61,6 +61,13 @@ typedef struct {
      * the phone gets no data at all, a FromNum failure costs only the doorbell,
      * and the phone polls regardless. */
     uint32_t publishes;
+
+    /* FromNum notifications sent, and worker loop iterations. Doorbells should
+     * be roughly one per batch rather than one per message. Worker ticks are
+     * proof of life: a frozen app with a static tick count means the worker
+     * stopped, and a climbing one means it did not. */
+    uint32_t doorbells;
+    uint32_t worker_ticks;
     uint32_t fail_radio;
     uint32_t fail_num;
 
