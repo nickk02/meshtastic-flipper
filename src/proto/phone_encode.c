@@ -263,6 +263,30 @@ const char* phone_admin_reason_name(PhoneAdminReason reason) {
     return "unknown";
 }
 
+/* The field number of the first field in a message.
+ *
+ * AdminMessage.payload_variant is a oneof, so the first field is the request.
+ * Returns 0 for an empty or malformed message, and 0 is not a legal field
+ * number, so it doubles as "nothing here". */
+static uint32_t first_field(const uint8_t* buf, size_t len) {
+    size_t pos = 0;
+    uint64_t tag;
+
+    if(buf == NULL || len == 0) return 0;
+    if(!read_varint(buf, len, &pos, &tag)) return 0;
+    return (uint32_t)(tag >> 3);
+}
+
+/* True for any admin message. The reason code from the get_owner specific walk
+ * distinguishes "not an admin message at all" from "an admin message asking
+ * something else", and only the first means there is nothing to answer. */
+bool phone_decode_admin_request(const uint8_t* buf, size_t len, PhoneAdminRequest* out) {
+    PhoneAdminReason reason = PhoneAdminOk;
+
+    if(phone_decode_get_owner_request_why(buf, len, out, &reason)) return true;
+    return reason == PhoneAdminNotGetOwner && out->admin_field != 0;
+}
+
 bool phone_decode_get_owner_request(const uint8_t* buf, size_t len, PhoneAdminRequest* out) {
     PhoneAdminReason ignored;
     return phone_decode_get_owner_request_why(buf, len, out, &ignored);
@@ -310,11 +334,23 @@ bool phone_decode_get_owner_request_why(
         return false;
     }
 
-    /* get_owner_request is a bool. Protobuf omits false, so an absent field is
-     * a different request, not this one. */
-    if(!scan_field(payload, payload_len, ADMIN_FIELD_GET_OWNER_REQUEST, NULL, NULL, &value) ||
-       value == 0) {
+    /* Whichever admin field this carries. The first one wins: payload_variant
+     * is a oneof, so there is only ever one. */
+    out->admin_field = first_field(payload, payload_len);
+    if(scan_field(data, data_len, DATA_FIELD_WANT_RESPONSE, NULL, NULL, &value)) {
+        out->want_response = value != 0;
+    }
+
+    if(out->admin_field != ADMIN_GET_OWNER_REQUEST) {
         *reason = PhoneAdminNotGetOwner;
+        /* Still fill in the addressing, because the caller that wants any admin
+         * message rather than this one specifically needs it. */
+        if(scan_field(packet, packet_len, MESHPACKET_FIELD_ID, NULL, NULL, &value)) {
+            out->packet_id = (uint32_t)value;
+        }
+        if(scan_field(packet, packet_len, MESHPACKET_FIELD_FROM, NULL, NULL, &value)) {
+            out->from = (uint32_t)value;
+        }
         return false;
     }
 
@@ -610,6 +646,83 @@ size_t phone_encode_get_owner_response(
     if(!pb_writer_ok(&w)) return 0;
 
     return phone_encode_packet(packet, pb_writer_len(&w), out, out_len);
+}
+
+/* Wraps an already-built Data into FromRadio.packet, addressed at the sender. */
+static size_t wrap_admin_packet(
+    const PhoneIdentity* id,
+    const PhoneAdminRequest* request,
+    const uint8_t* data,
+    size_t data_len,
+    uint8_t* out,
+    size_t out_len) {
+    uint8_t packet[192];
+    PbWriter w;
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_FROM, id->node_num);
+    pb_write_fixed32_field(&w, MESHPACKET_FIELD_TO, request->from);
+    pb_write_submessage(&w, MESHPACKET_FIELD_DECODED, data, data_len);
+    pb_write_fixed32_field(&w, MESHPACKET_FIELD_ID, request->packet_id);
+    if(!pb_writer_ok(&w)) return 0;
+
+    return phone_encode_packet(packet, pb_writer_len(&w), out, out_len);
+}
+
+size_t phone_encode_admin_reply(
+    const PhoneIdentity* id,
+    const PhoneAdminRequest* request,
+    const uint8_t* passkey,
+    uint8_t* out,
+    size_t out_len) {
+    uint8_t admin[128];
+    uint8_t data[160];
+    PbWriter w;
+    size_t admin_len = 0;
+    uint32_t portnum = PORTNUM_ADMIN_APP;
+
+    if(id == NULL || request == NULL || out == NULL) return 0;
+    if(!request->want_response) return 0;
+
+    switch(request->admin_field) {
+    case ADMIN_GET_OWNER_REQUEST:
+        return phone_encode_get_owner_response(id, request, passkey, out, out_len);
+
+    case ADMIN_GET_CANNED_REQUEST:
+    case ADMIN_GET_RINGTONE_REQUEST: {
+        /* Both responses are strings and both are legitimately empty here: this
+         * device has no canned messages and no ringtone. An empty string is an
+         * answer, silence is not, and the client waits on the difference. */
+        uint32_t field = request->admin_field == ADMIN_GET_CANNED_REQUEST ?
+                             ADMIN_GET_CANNED_RESPONSE :
+                             ADMIN_GET_RINGTONE_RESPONSE;
+        pb_writer_init(&w, admin, sizeof(admin));
+        pb_write_string_field(&w, field, "");
+        if(passkey != NULL) {
+            pb_write_bytes_field(
+                &w, ADMIN_FIELD_SESSION_PASSKEY, passkey, PHONE_SESSION_PASSKEY_LEN);
+        }
+        if(!pb_writer_ok(&w)) return 0;
+        admin_len = pb_writer_len(&w);
+        break;
+    }
+
+    default:
+        /* Everything else, setters included, is acknowledged on the routing
+         * port. Routing with no error_reason is an ACK, and error_reason NONE
+         * is 0, so the message is deliberately empty. */
+        portnum = PORTNUM_ROUTING_APP;
+        admin_len = 0;
+        break;
+    }
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, DATA_FIELD_PORTNUM, portnum);
+    if(admin_len > 0) pb_write_bytes_field(&w, DATA_FIELD_PAYLOAD, admin, admin_len);
+    pb_write_fixed32_field(&w, DATA_FIELD_REQUEST_ID, request->packet_id);
+    if(!pb_writer_ok(&w)) return 0;
+
+    return wrap_admin_packet(id, request, data, pb_writer_len(&w), out, out_len);
 }
 
 void phone_identity_from_config(const MeshConfig* config, PhoneIdentity* out) {

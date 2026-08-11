@@ -188,9 +188,31 @@ bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce
  *
  * The reply has to be addressed back at the sender and carry the request's id,
  * or the client cannot match it to what it asked. */
+/* admin.proto, AdminMessage payload_variant. Only the ones a real phone was
+ * observed sending, plus their response fields.
+ *
+ * A serial capture of the Android client shows it asking for canned messages
+ * and a ringtone and pushing a timezone with set_config, all with
+ * want_response set. It never sends get_owner_request. Implementing only
+ * get_owner, on the strength of the SDK doc naming it, answered a question
+ * nobody asked. */
+#define ADMIN_GET_OWNER_REQUEST     3
+#define ADMIN_GET_OWNER_RESPONSE    4
+#define ADMIN_GET_CANNED_REQUEST    10
+#define ADMIN_GET_CANNED_RESPONSE   11
+#define ADMIN_GET_RINGTONE_REQUEST  14
+#define ADMIN_GET_RINGTONE_RESPONSE 15
+#define ADMIN_SET_CONFIG            34
+
+/* portnums.proto. A request with no matching admin response is acknowledged on
+ * the routing port instead. */
+#define PORTNUM_ROUTING_APP 5
+
 typedef struct {
     uint32_t packet_id; /* MeshPacket.id, echoed as Data.request_id */
     uint32_t from; /* MeshPacket.from, the reply's destination */
+    uint32_t admin_field; /* which AdminMessage field the request carried */
+    bool want_response; /* Data.want_response */
 } PhoneAdminRequest;
 
 /* Why an admin decode gave up.
@@ -212,10 +234,14 @@ typedef enum {
 
 const char* phone_admin_reason_name(PhoneAdminReason reason);
 
-/* True when the ToRadio holds an AdminMessage.get_owner_request.
+/* True when the ToRadio holds any AdminMessage, whatever it asks for.
  *
- * The phone will not report Connected until this is answered, so a request that
- * is silently not recognised looks exactly like a device that has hung. */
+ * The client sends several different admin requests and waits on each one it
+ * marked want_response. Recognising a single kind and ignoring the rest stalls
+ * it just as thoroughly as recognising none. */
+bool phone_decode_admin_request(const uint8_t* buf, size_t len, PhoneAdminRequest* out);
+
+/* Kept for the tests, and for anything that only cares about get_owner. */
 bool phone_decode_get_owner_request(const uint8_t* buf, size_t len, PhoneAdminRequest* out);
 
 /* Same, reporting where it gave up. */
@@ -230,6 +256,19 @@ bool phone_decode_get_owner_request_why(
  *
  * passkey must be PHONE_SESSION_PASSKEY_LEN bytes. */
 size_t phone_encode_get_owner_response(
+    const PhoneIdentity* id,
+    const PhoneAdminRequest* request,
+    const uint8_t* passkey,
+    uint8_t* out,
+    size_t out_len);
+
+/* The reply for whatever the request asked.
+ *
+ * A known getter gets its matching admin response. Anything else, including
+ * every setter, gets a routing acknowledgement, which is what the client is
+ * waiting for when it set want_response on a message that has no reply of its
+ * own. Returns 0 when no reply is owed. */
+size_t phone_encode_admin_reply(
     const PhoneIdentity* id,
     const PhoneAdminRequest* request,
     const uint8_t* passkey,

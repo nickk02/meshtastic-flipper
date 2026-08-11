@@ -60,17 +60,23 @@ bool handshake_handle_to_radio(
     /* An admin get_owner_request is answered whatever stage we are in, and
      * before the want_config parse, since it is not a want_config at all.
      *
-     * handshake-fsm.md: the client does not reach Ready, meaning Connected,
-     * until get_owner_response lands and a session_passkey is latched. Both
-     * config stages completing and then silence is what makes it time out and
-     * reconnect in a loop. */
-    if(phone_decode_get_owner_request(data, len, &h->admin)) {
-        written = phone_encode_get_owner_response(
+     * A capture of the Android client shows it asking for canned messages and a
+     * ringtone and pushing a timezone with set_config once both config stages
+     * finish, every one of them with want_response set. It never sends
+     * get_owner_request. Answering only that one, which is what handshake-fsm.md
+     * names, left every real question unanswered and the client timed out and
+     * reconnected in a loop. */
+    if(phone_decode_admin_request(data, len, &h->admin)) {
+        written = phone_encode_admin_reply(
             &h->identity,
             &h->admin,
             h->session_passkey,
             reply->messages[reply->count].data,
             HANDSHAKE_MAX_MESSAGE);
+        /* A request that wants no response is still handled, not ignored: the
+         * caller uses the return to decide whether the message was understood,
+         * and an unanswered admin message reads as a stalled device. */
+        if(written == 0) return true;
         return push(reply, written);
     }
 
