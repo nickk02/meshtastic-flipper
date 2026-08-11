@@ -243,7 +243,36 @@ static bool scan_field(
     return found;
 }
 
+const char* phone_admin_reason_name(PhoneAdminReason reason) {
+    switch(reason) {
+    case PhoneAdminOk:
+        return "ok";
+    case PhoneAdminNoPacket:
+        return "no packet";
+    case PhoneAdminNoDecoded:
+        return "no decoded data";
+    case PhoneAdminNoPortnum:
+        return "no portnum";
+    case PhoneAdminWrongPortnum:
+        return "not admin portnum";
+    case PhoneAdminNoPayload:
+        return "no payload";
+    case PhoneAdminNotGetOwner:
+        return "admin but not get_owner";
+    }
+    return "unknown";
+}
+
 bool phone_decode_get_owner_request(const uint8_t* buf, size_t len, PhoneAdminRequest* out) {
+    PhoneAdminReason ignored;
+    return phone_decode_get_owner_request_why(buf, len, out, &ignored);
+}
+
+bool phone_decode_get_owner_request_why(
+    const uint8_t* buf,
+    size_t len,
+    PhoneAdminRequest* out,
+    PhoneAdminReason* reason) {
     const uint8_t* packet = NULL;
     const uint8_t* data = NULL;
     const uint8_t* payload = NULL;
@@ -252,25 +281,42 @@ bool phone_decode_get_owner_request(const uint8_t* buf, size_t len, PhoneAdminRe
     size_t payload_len = 0;
     uint64_t value = 0;
 
-    if(out == NULL) return false;
+    if(out == NULL || reason == NULL) return false;
     memset(out, 0, sizeof(*out));
+    *reason = PhoneAdminOk;
 
     /* ToRadio.packet -> MeshPacket.decoded -> Data. An admin request that is
      * encrypted rather than decoded is not for us to answer. */
-    if(!scan_field(buf, len, TORADIO_FIELD_PACKET, &packet, &packet_len, NULL)) return false;
-    if(!scan_field(packet, packet_len, MESHPACKET_FIELD_DECODED, &data, &data_len, NULL))
+    if(!scan_field(buf, len, TORADIO_FIELD_PACKET, &packet, &packet_len, NULL)) {
+        *reason = PhoneAdminNoPacket;
         return false;
+    }
+    if(!scan_field(packet, packet_len, MESHPACKET_FIELD_DECODED, &data, &data_len, NULL)) {
+        *reason = PhoneAdminNoDecoded;
+        return false;
+    }
 
-    if(!scan_field(data, data_len, DATA_FIELD_PORTNUM, NULL, NULL, &value)) return false;
-    if(value != PORTNUM_ADMIN_APP) return false;
+    if(!scan_field(data, data_len, DATA_FIELD_PORTNUM, NULL, NULL, &value)) {
+        *reason = PhoneAdminNoPortnum;
+        return false;
+    }
+    if(value != PORTNUM_ADMIN_APP) {
+        *reason = PhoneAdminWrongPortnum;
+        return false;
+    }
 
-    if(!scan_field(data, data_len, DATA_FIELD_PAYLOAD, &payload, &payload_len, NULL)) return false;
+    if(!scan_field(data, data_len, DATA_FIELD_PAYLOAD, &payload, &payload_len, NULL)) {
+        *reason = PhoneAdminNoPayload;
+        return false;
+    }
 
     /* get_owner_request is a bool. Protobuf omits false, so an absent field is
      * a different request, not this one. */
-    if(!scan_field(payload, payload_len, ADMIN_FIELD_GET_OWNER_REQUEST, NULL, NULL, &value))
+    if(!scan_field(payload, payload_len, ADMIN_FIELD_GET_OWNER_REQUEST, NULL, NULL, &value) ||
+       value == 0) {
+        *reason = PhoneAdminNotGetOwner;
         return false;
-    if(value == 0) return false;
+    }
 
     if(scan_field(packet, packet_len, MESHPACKET_FIELD_ID, NULL, NULL, &value)) {
         out->packet_id = (uint32_t)value;
