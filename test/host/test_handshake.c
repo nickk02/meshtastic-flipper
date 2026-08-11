@@ -381,6 +381,73 @@ TEST(test_get_owner_response_carries_the_name) {
         strlen(id.owner.long_name)));
 }
 
+/* The exact bytes a real Android client sent, from a serial capture. The
+ * payload is field 14, get_ringtone_request, not field 3. */
+TEST(test_real_ringtone_request_is_recognised) {
+    const uint8_t observed[] = {0x0a, 0x1d, 0x0d, 0x26, 0x69, 0x6c, 0x46, 0x15, 0x26, 0x69, 0x6c,
+                                0x46, 0x22, 0x08, 0x08, 0x06, 0x12, 0x02, 0x70, 0x01, 0x18, 0x01,
+                                0x35, 0xf6, 0x33, 0x77, 0x04, 0x50, 0x01, 0x58, 0x46};
+    PhoneAdminRequest req;
+
+    ASSERT_TRUE(phone_decode_admin_request(observed, sizeof(observed), &req));
+    ASSERT_EQ_INT(req.admin_field, ADMIN_GET_RINGTONE_REQUEST);
+    ASSERT_TRUE(req.want_response);
+    ASSERT_EQ_INT(req.packet_id, 0x047733f6);
+    /* get_owner specifically must reject it, which is why answering only
+     * get_owner left the client waiting. */
+    ASSERT_TRUE(!phone_decode_get_owner_request(observed, sizeof(observed), &req));
+}
+
+/* Same capture, the canned messages request. Field 10. */
+TEST(test_real_canned_message_request_is_recognised) {
+    const uint8_t observed[] = {0x0a, 0x1d, 0x0d, 0x26, 0x69, 0x6c, 0x46, 0x15, 0x26, 0x69, 0x6c,
+                                0x46, 0x22, 0x08, 0x08, 0x06, 0x12, 0x02, 0x50, 0x01, 0x18, 0x01,
+                                0x35, 0x97, 0xbb, 0xf5, 0x8d, 0x50, 0x01, 0x58, 0x46};
+    PhoneAdminRequest req;
+
+    ASSERT_TRUE(phone_decode_admin_request(observed, sizeof(observed), &req));
+    ASSERT_EQ_INT(req.admin_field, ADMIN_GET_CANNED_REQUEST);
+    ASSERT_TRUE(req.want_response);
+}
+
+TEST(test_every_observed_request_is_answered) {
+    /* Each of these went unanswered in the capture, and each one stalls the
+     * client on its own. */
+    const uint32_t fields[] = {
+        ADMIN_GET_RINGTONE_REQUEST, ADMIN_GET_CANNED_REQUEST, ADMIN_SET_CONFIG};
+    const uint8_t passkey[PHONE_SESSION_PASSKEY_LEN] = {1, 2, 3, 4, 5, 6, 7, 8};
+    PhoneIdentity pid;
+    MeshConfig cfg = identity();
+    uint8_t out[HANDSHAKE_MAX_MESSAGE];
+
+    phone_identity_from_config(&cfg, &pid);
+
+    for(size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        PhoneAdminRequest req = {
+            .packet_id = 42, .from = 7, .admin_field = fields[i], .want_response = true};
+        size_t len = phone_encode_admin_reply(&pid, &req, passkey, out, sizeof(out));
+        ASSERT_TRUE(len > 0);
+        ASSERT_EQ_INT(out[0] >> 3, FROMRADIO_FIELD_PACKET);
+    }
+}
+
+TEST(test_no_reply_when_none_wanted) {
+    /* want_response false means the client is not waiting, so sending anything
+     * is noise on a link that is already tight. */
+    const uint8_t passkey[PHONE_SESSION_PASSKEY_LEN] = {0};
+    PhoneIdentity pid;
+    MeshConfig cfg = identity();
+    uint8_t out[HANDSHAKE_MAX_MESSAGE];
+    PhoneAdminRequest req = {
+        .packet_id = 1,
+        .from = 2,
+        .admin_field = ADMIN_GET_RINGTONE_REQUEST,
+        .want_response = false};
+
+    phone_identity_from_config(&cfg, &pid);
+    ASSERT_EQ_INT(phone_encode_admin_reply(&pid, &req, passkey, out, sizeof(out)), 0);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_starts_idle);
 RUN_TEST(test_stage_one_follows_the_firmware_order);
@@ -396,5 +463,9 @@ RUN_TEST(test_non_admin_packet_is_not_a_get_owner);
 RUN_TEST(test_want_config_is_not_a_get_owner);
 RUN_TEST(test_handshake_answers_get_owner_at_any_stage);
 RUN_TEST(test_get_owner_response_carries_the_name);
+RUN_TEST(test_real_ringtone_request_is_recognised);
+RUN_TEST(test_real_canned_message_request_is_recognised);
+RUN_TEST(test_every_observed_request_is_answered);
+RUN_TEST(test_no_reply_when_none_wanted);
 RUN_TEST(test_tolerates_null);
 TEST_MAIN_END()
