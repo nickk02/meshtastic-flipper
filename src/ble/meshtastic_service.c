@@ -462,12 +462,45 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
         service->stat_last_nonce = nonce;
         understood = true;
         FURI_LOG_I(TAG, "ToRadio want_config_id nonce=%lu", (unsigned long)nonce);
+
+        if(nonce == PHONE_NONCE_CONFIG) {
+            /* A fresh stage one request is the only reliable signal that a new
+             * handshake is starting, so it is also the only reliable point to
+             * discard whatever is left from a previous one. Without this,
+             * items a prior connection never got to (because it disconnected
+             * mid drain) stay in the queue and consume capacity meant for the
+             * new session, which is exactly what turned into "queue full,
+             * reply 31 of 36 dropped" on real hardware. */
+            furi_mutex_acquire(service->mutex, FuriWaitForever);
+            service->head = 0;
+            service->tail = 0;
+            service->pending = 0;
+            service->drain_active = false;
+            service->doorbell_rung = false;
+            furi_mutex_release(service->mutex);
+        }
     } else if(len > 0 && (data[0] >> 3) == TORADIO_FIELD_HEARTBEAT) {
         /* The settle heartbeat between stages. The firmware does not echo it,
          * so sending nothing back is correct, and this line is here so a silent
          * device can be told apart from a deaf one. */
         understood = true;
         FURI_LOG_I(TAG, "ToRadio heartbeat, no reply expected");
+    } else {
+        /* Decoded independently of the handshake's own admin handling, purely
+         * to log which field a real connection actually asked for. The device
+         * has disconnected after a full cycle with every counter clean, so the
+         * question left is not whether a request was answered but whether the
+         * three requests a real phone sends (canned messages, ringtone,
+         * set_config) are the same three seen here, and in what order. */
+        PhoneAdminRequest admin_probe;
+        if(phone_decode_admin_request(data, len, &admin_probe)) {
+            FURI_LOG_I(
+                TAG,
+                "ToRadio admin field=%lu want_response=%d req_id=%lu",
+                (unsigned long)admin_probe.admin_field,
+                (int)admin_probe.want_response,
+                (unsigned long)admin_probe.packet_id);
+        }
     }
 
     /* The first tag of the ToRadio message. ToRadio is a oneof, so this is what
@@ -595,14 +628,33 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
     return BleEventAckFlowEnable;
 }
 
-/* 150ms per drain step. The client re-polls every 200ms
- * (BleRadioTransport.kt:77), so this stays ahead of it without running so far
- * ahead that a message is skipped. */
-#define DRAIN_INTERVAL_MS 150
+/* This project spent a long time chasing a "the client re-polls every
+ * 200ms" claim that traced to a file that does not exist in the current
+ * client. The real mechanism, confirmed by reading
+ * KableMeshtasticRadioProfile.kt: FromNum notifies once, the client then
+ * reads FromRadio in a tight loop with no artificial delay until a read
+ * comes back empty.
+ *
+ * A real phone over real BLE was measured at roughly 140-150ms per message
+ * end to end (write ack, notify, read, protobuf parse, persist). At the
+ * previous 150ms drain step that is close to a 1:1 race: stage two is only
+ * two messages, so the whole batch, including the empty marker that ends it,
+ * is gone in 450ms. If the client's very first read after the doorbell lands
+ * even slightly late, it gets nothing from that batch, including
+ * config_complete_id, the one message that ends the stage. The device's own
+ * counters still report "2 sent, 0 refused", because our queue emptied
+ * correctly; the client just never saw it. This is consistent with what was
+ * observed on hardware: the phone's UI reaches "Retrieving nodes" (stage two)
+ * and then drops, every cycle.
+ *
+ * 350ms gives roughly 2x margin over the measured per-message rate rather
+ * than roughly 1x, at the cost of a slower overall handshake. There is still
+ * no way to detect a real read from a FAP, so this is tuned to the one
+ * measurement available rather than fixed by an assumed spec value. */
+#define DRAIN_INTERVAL_MS 350
 
-/* Wake often enough to hold that interval, but not so often that an idle
- * connection spins. */
-#define WORKER_POLL_MS 25
+/* Wake often enough to hold that interval without idle spinning. */
+#define WORKER_POLL_MS 50
 
 /* The one thread allowed to touch the BLE stack for us. It handles inbound
  * writes and paces the outbound queue. Both jobs live here so that no callback
