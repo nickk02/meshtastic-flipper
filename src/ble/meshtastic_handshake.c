@@ -1,5 +1,9 @@
 #include "src/ble/meshtastic_handshake.h"
 
+/* How many times each stage two message is queued. See the comment where it
+ * is used. */
+#define STAGE_TWO_REPEATS 4
+
 /* config.proto, Config.lora. */
 #define CONFIG_VARIANT_LORA 6
 
@@ -156,13 +160,34 @@ bool handshake_handle_to_radio(
     }
 
     if(nonce == PHONE_NONCE_NODE_INFO) {
-        written = phone_encode_node_info(
-            &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
-        if(!push(reply, written)) return false;
+        /* Each message is queued STAGE_TWO_REPEATS times, not once.
+         *
+         * A FAP cannot detect when a phone actually reads a characteristic, so
+         * the drain publishes each queued message for one interval and then
+         * moves on regardless of whether anyone saw it. Once the queue is
+         * empty the timer stops and the value freezes on empty. For a large
+         * batch that is a survivable risk, since a slow reader still has many
+         * messages' worth of window to catch up in. For this two message
+         * batch it was not: the whole thing, including config_complete_id,
+         * the only message that ends the stage, was visible for well under a
+         * second and then gone for good. A device-side log confirmed 0
+         * refused every time, meaning the device believed it had sent
+         * everything while the phone's own UI stayed on "Retrieving nodes"
+         * and then dropped, every cycle, on real hardware.
+         *
+         * Repeating each message trades a slightly longer stage two for many
+         * independent chances to be read, rather than exactly one. */
+        for(int i = 0; i < STAGE_TWO_REPEATS; i++) {
+            written = phone_encode_node_info(
+                &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            if(!push(reply, written)) return false;
+        }
 
-        written = phone_encode_config_complete(
-            PHONE_NONCE_NODE_INFO, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
-        if(!push(reply, written)) return false;
+        for(int i = 0; i < STAGE_TWO_REPEATS; i++) {
+            written = phone_encode_config_complete(
+                PHONE_NONCE_NODE_INFO, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            if(!push(reply, written)) return false;
+        }
 
         h->stage = HandshakeComplete;
         return true;

@@ -156,12 +156,21 @@ TEST(test_stage_two_returns_node_info_then_config_complete) {
     size_t len = make_want_config(PHONE_NONCE_NODE_INFO, to_radio, sizeof(to_radio));
 
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    ASSERT_EQ_INT(reply.count, 2);
-    ASSERT_EQ_INT(reply.messages[0].data[0] >> 3, FROMRADIO_FIELD_NODE_INFO);
-
-    ASSERT_TRUE(has_varint_field(
-        reply.messages[1].data, reply.messages[1].len, FROMRADIO_FIELD_CONFIG_COMPLETE_ID, &value));
-    ASSERT_EQ_INT(value, PHONE_NONCE_NODE_INFO);
+    /* Each message repeats four times: this is not a single unreliable pass,
+     * since a device that cannot detect reads has no other way to give a slow
+     * reader more than one chance. */
+    ASSERT_EQ_INT(reply.count, 8);
+    for(size_t i = 0; i < 4; i++) {
+        ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_NODE_INFO);
+    }
+    for(size_t i = 4; i < 8; i++) {
+        ASSERT_TRUE(has_varint_field(
+            reply.messages[i].data,
+            reply.messages[i].len,
+            FROMRADIO_FIELD_CONFIG_COMPLETE_ID,
+            &value));
+        ASSERT_EQ_INT(value, PHONE_NONCE_NODE_INFO);
+    }
 
     ASSERT_TRUE(handshake_is_complete(&h));
 }
