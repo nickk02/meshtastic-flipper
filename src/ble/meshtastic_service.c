@@ -462,12 +462,45 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
         service->stat_last_nonce = nonce;
         understood = true;
         FURI_LOG_I(TAG, "ToRadio want_config_id nonce=%lu", (unsigned long)nonce);
+
+        if(nonce == PHONE_NONCE_CONFIG) {
+            /* A fresh stage one request is the only reliable signal that a new
+             * handshake is starting, so it is also the only reliable point to
+             * discard whatever is left from a previous one. Without this,
+             * items a prior connection never got to (because it disconnected
+             * mid drain) stay in the queue and consume capacity meant for the
+             * new session, which is exactly what turned into "queue full,
+             * reply 31 of 36 dropped" on real hardware. */
+            furi_mutex_acquire(service->mutex, FuriWaitForever);
+            service->head = 0;
+            service->tail = 0;
+            service->pending = 0;
+            service->drain_active = false;
+            service->doorbell_rung = false;
+            furi_mutex_release(service->mutex);
+        }
     } else if(len > 0 && (data[0] >> 3) == TORADIO_FIELD_HEARTBEAT) {
         /* The settle heartbeat between stages. The firmware does not echo it,
          * so sending nothing back is correct, and this line is here so a silent
          * device can be told apart from a deaf one. */
         understood = true;
         FURI_LOG_I(TAG, "ToRadio heartbeat, no reply expected");
+    } else {
+        /* Decoded independently of the handshake's own admin handling, purely
+         * to log which field a real connection actually asked for. The device
+         * has disconnected after a full cycle with every counter clean, so the
+         * question left is not whether a request was answered but whether the
+         * three requests a real phone sends (canned messages, ringtone,
+         * set_config) are the same three seen here, and in what order. */
+        PhoneAdminRequest admin_probe;
+        if(phone_decode_admin_request(data, len, &admin_probe)) {
+            FURI_LOG_I(
+                TAG,
+                "ToRadio admin field=%lu want_response=%d req_id=%lu",
+                (unsigned long)admin_probe.admin_field,
+                (int)admin_probe.want_response,
+                (unsigned long)admin_probe.packet_id);
+        }
     }
 
     /* The first tag of the ToRadio message. ToRadio is a oneof, so this is what
@@ -595,14 +628,36 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
     return BleEventAckFlowEnable;
 }
 
-/* 150ms per drain step. The client re-polls every 200ms
- * (BleRadioTransport.kt:77), so this stays ahead of it without running so far
- * ahead that a message is skipped. */
-#define DRAIN_INTERVAL_MS 150
+/* 350ms per drain step, set from a device-side measurement.
+ *
+ * A real phone over real BLE was timed at roughly 140-150ms per message end
+ * to end (write ack, notify, read, protobuf parse, persist). That is the only
+ * hard number available here, so the step is set against it: at 350ms the
+ * drain advances at roughly half the rate the client was measured to consume,
+ * which is about 2x margin instead of the roughly 1x that the previous 150ms
+ * gave.
+ *
+ * Two earlier values, 150ms and 260ms, were each argued from a claim that the
+ * client re-polls on a fixed 200ms interval. That interval was never observed
+ * on this hardware, and the source it was attributed to does not describe the
+ * client this device talks to. Do not reintroduce a value derived that way. A
+ * FAP cannot detect a real read, so the only honest basis for this number is
+ * what was timed against the actual phone.
+ *
+ * Why the margin matters: stage two is two messages, so at 150ms the whole
+ * batch, including the empty marker that ends it, was gone in 450ms. A first
+ * read landing even slightly late got nothing from it, config_complete_id
+ * included, which is the one message that ends the stage. The device's own
+ * counters still reported "2 sent, 0 refused", because the queue did empty
+ * correctly and the client simply never saw it. That matches the hardware
+ * symptom: the phone reaches "Retrieving nodes" and then drops, every cycle.
+ *
+ * The cost is a slower handshake overall. See STAGE_TWO_REPEATS in
+ * meshtastic_handshake.c, which covers the same risk from the other side. */
+#define DRAIN_INTERVAL_MS 350
 
-/* Wake often enough to hold that interval, but not so often that an idle
- * connection spins. */
-#define WORKER_POLL_MS 25
+/* Wake often enough to hold that interval without idle spinning. */
+#define WORKER_POLL_MS 50
 
 /* The one thread allowed to touch the BLE stack for us. It handles inbound
  * writes and paces the outbound queue. Both jobs live here so that no callback
