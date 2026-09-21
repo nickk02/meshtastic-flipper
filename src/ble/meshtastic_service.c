@@ -628,29 +628,32 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
     return BleEventAckFlowEnable;
 }
 
-/* This project spent a long time chasing a "the client re-polls every
- * 200ms" claim that traced to a file that does not exist in the current
- * client. The real mechanism, confirmed by reading
- * KableMeshtasticRadioProfile.kt: FromNum notifies once, the client then
- * reads FromRadio in a tight loop with no artificial delay until a read
- * comes back empty.
+/* 350ms per drain step, set from a device-side measurement.
  *
- * A real phone over real BLE was measured at roughly 140-150ms per message
- * end to end (write ack, notify, read, protobuf parse, persist). At the
- * previous 150ms drain step that is close to a 1:1 race: stage two is only
- * two messages, so the whole batch, including the empty marker that ends it,
- * is gone in 450ms. If the client's very first read after the doorbell lands
- * even slightly late, it gets nothing from that batch, including
- * config_complete_id, the one message that ends the stage. The device's own
- * counters still report "2 sent, 0 refused", because our queue emptied
- * correctly; the client just never saw it. This is consistent with what was
- * observed on hardware: the phone's UI reaches "Retrieving nodes" (stage two)
- * and then drops, every cycle.
+ * A real phone over real BLE was timed at roughly 140-150ms per message end
+ * to end (write ack, notify, read, protobuf parse, persist). That is the only
+ * hard number available here, so the step is set against it: at 350ms the
+ * drain advances at roughly half the rate the client was measured to consume,
+ * which is about 2x margin instead of the roughly 1x that the previous 150ms
+ * gave.
  *
- * 350ms gives roughly 2x margin over the measured per-message rate rather
- * than roughly 1x, at the cost of a slower overall handshake. There is still
- * no way to detect a real read from a FAP, so this is tuned to the one
- * measurement available rather than fixed by an assumed spec value. */
+ * Two earlier values, 150ms and 260ms, were each argued from a claim that the
+ * client re-polls on a fixed 200ms interval. That interval was never observed
+ * on this hardware, and the source it was attributed to does not describe the
+ * client this device talks to. Do not reintroduce a value derived that way. A
+ * FAP cannot detect a real read, so the only honest basis for this number is
+ * what was timed against the actual phone.
+ *
+ * Why the margin matters: stage two is two messages, so at 150ms the whole
+ * batch, including the empty marker that ends it, was gone in 450ms. A first
+ * read landing even slightly late got nothing from it, config_complete_id
+ * included, which is the one message that ends the stage. The device's own
+ * counters still reported "2 sent, 0 refused", because the queue did empty
+ * correctly and the client simply never saw it. That matches the hardware
+ * symptom: the phone reaches "Retrieving nodes" and then drops, every cycle.
+ *
+ * The cost is a slower handshake overall. See STAGE_TWO_REPEATS in
+ * meshtastic_handshake.c, which covers the same risk from the other side. */
 #define DRAIN_INTERVAL_MS 350
 
 /* Wake often enough to hold that interval without idle spinning. */
