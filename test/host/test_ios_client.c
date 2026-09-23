@@ -137,8 +137,8 @@ TEST(test_stage_one_order_as_the_client_reads_it) {
 /* handleModuleConfig sends get_canned_message_module_messages_request on
  * the canned_message variant and get_ringtone_request on the
  * external_notification variant, both want_response. handleConfig sends
- * set_config with a tzdef when device.tzdef is empty. All three land during
- * stage one, and the device must answer the two that want a response. */
+ * set_config with a tzdef only when device.tzdef is empty, and this device
+ * sends one, so only the two that want a response land during stage one. */
 TEST(test_requests_the_client_makes_during_stage_one) {
     IosClient c;
     MeshConfig cfg = config();
@@ -148,15 +148,17 @@ TEST(test_requests_the_client_makes_during_stage_one) {
     ASSERT_EQ_INT(c.sent_get_canned, 1);
     ASSERT_EQ_INT(c.sent_get_ringtone, 1);
     ASSERT_EQ_INT(c.admin_responses, 2);
-    /* iOS does not set want_response on set_config or set_time, so the
-     * device owes nothing for them. */
+    /* config.device carries a tzdef, so handleConfig has nothing to write. */
+    ASSERT_EQ_INT(c.sent_set_config_tzdef, 0);
+    /* iOS does not set want_response on set_time, so the device owes nothing
+     * for it. */
     ASSERT_EQ_INT(c.routing_acks, 0);
     ASSERT_EQ_INT(c.to_radio_not_understood, 0);
     /* Every request the client sent was one the device recognised. */
     ASSERT_EQ_INT(
         c.to_radio_writes,
         2 /* heartbeats */ + 2 /* want_config */ + c.sent_get_canned + c.sent_get_ringtone +
-            c.sent_set_config_tzdef + c.sent_set_time);
+            c.sent_set_time);
 }
 
 /* Every frame must fit one ATT read. */
@@ -225,11 +227,8 @@ TEST(test_paced_flow_reproduces_the_cycle) {
     ASSERT_TRUE(stage1 >= 30u * IOS_MODEL_DRAIN_INTERVAL_MS);
     ASSERT_TRUE(stage1 < 42u * IOS_MODEL_DRAIN_INTERVAL_MS);
 
-    /* Every duplicate read of config.device is another handleConfig call,
-     * and each one sends set_config. The phone writes the timezone several
-     * times per connect because of the transport, not because it wants to. */
-    printf("  set_config(tzdef) writes caused by duplicate reads: %d\n", c.sent_set_config_tzdef);
-    ASSERT_TRUE(c.sent_set_config_tzdef > 1);
+    /* The device variant now carries a tzdef, so no read of it sends set_config. */
+    ASSERT_EQ_INT(c.sent_set_config_tzdef, 0);
 
     /* handleNodeInfo counts every NodeInfo it reads as another node. With
      * STAGE_TWO_REPEATS at 4, four copies each read about four times made the
