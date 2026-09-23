@@ -97,6 +97,11 @@ typedef struct {
 
 void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out);
 
+/* The phone disconnected. Safe to call from the Bt service thread: it only
+ * posts to the worker, which clears the queue, publishes an empty FromRadio
+ * value and returns the handshake to idle. */
+void meshtastic_ble_service_on_disconnect(MeshtasticBleService* service);
+
 /* True once a phone has completed both handshake stages. */
 bool meshtastic_ble_service_is_connected(MeshtasticBleService* service);
 

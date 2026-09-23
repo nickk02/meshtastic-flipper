@@ -241,10 +241,35 @@ TEST(test_paced_flow_reproduces_the_cycle) {
     ASSERT_TRUE(c.node_count > 1);
 }
 
-/* A link that drops mid batch leaves the published value in place. On the
- * next connect the phone's first drain reads it before the new stage one
- * has queued anything, and processes a frame from the old session. */
-TEST(test_stale_value_survives_a_reconnect_today) {
+/* Start stage one, let a few frames publish, drop the link mid batch, and
+ * reconnect 2s later (retryDelay) with the full connect flow. device_resets
+ * chooses whether the device clears on disconnect, which is what
+ * meshtastic_ble_service_on_disconnect now does on hardware. */
+static void drop_mid_batch_and_reconnect(IosClient* c, const MeshConfig* cfg, bool device_resets) {
+    uint8_t buf[16];
+    size_t n = ios_build_want_config(buf, sizeof(buf), IOS_NONCE_CONFIG);
+
+    ios_client_init(c, cfg, IosTransportPaced);
+    c->refresh_active = true;
+    c->stage = 1;
+    ios_device_write(c, buf, n);
+    ios_device_advance(c, c->now_ms + 5 * IOS_MODEL_DRAIN_INTERVAL_MS);
+    ios_client_disconnect(c);
+    if(device_resets) ios_device_reset(c);
+    ios_device_advance(c, c->now_ms + 2000);
+
+    /* Only the new session's frames count from here. */
+    memset(c->frames_stage, 0, sizeof(c->frames_stage));
+    c->config_complete_ignored = 0;
+    ios_client_connect(c);
+}
+
+/* A link that drops mid batch leaves the published value in place unless the
+ * device clears on disconnect. Without the clear, the next connect's Step 2
+ * heartbeat drain reads it before the new stage one has queued anything, and
+ * processes frames from the old session. With it, that drain reads empty and
+ * stage one runs as on a first connect. */
+TEST(test_reset_on_disconnect_clears_the_stale_value) {
     IosClient c;
     MeshConfig cfg = config();
     uint8_t buf[16];
@@ -296,11 +321,58 @@ TEST(test_stale_value_survives_a_reconnect_today) {
     ios_device_advance(&c, c.now_ms + 5 * IOS_MODEL_DRAIN_INTERVAL_MS);
     ios_client_disconnect(&c);
     ios_device_reset(&c);
+    ASSERT_EQ_INT(c.published.len, 0);
+    ASSERT_EQ_INT(c.q_pending, 0);
+    ASSERT_EQ_INT(handshake_stage(&c.handshake), HandshakeIdle);
     ios_device_advance(&c, c.now_ms + 2000);
     before = c.frames_total;
     ios_send_heartbeat(&c);
     ios_drain(&c);
     ASSERT_EQ_INT(c.frames_total, before);
+
+    /* Side by side through the whole connect flow. Frames counted at stage 0
+     * are those read in Step 2, before this session sent want_config_id. */
+    IosClient first_connect;
+    IosClient without_reset;
+    IosClient with_reset;
+    ios_client_init(&first_connect, &cfg, IosTransportPaced);
+    ios_client_connect(&first_connect);
+    drop_mid_batch_and_reconnect(&without_reset, &cfg, false);
+    drop_mid_batch_and_reconnect(&with_reset, &cfg, true);
+    printf(
+        "  first connect:           %3d frames in Step 2, stage1 %d frames, 69420 ignored %d\n",
+        first_connect.frames_stage[0],
+        first_connect.frames_stage[1],
+        first_connect.config_complete_ignored);
+    printf(
+        "  reconnect without reset: %3d frames in Step 2, stage1 %d frames, 69420 ignored %d\n",
+        without_reset.frames_stage[0],
+        without_reset.frames_stage[1],
+        without_reset.config_complete_ignored);
+    printf(
+        "  reconnect with reset:    %3d frames in Step 2, stage1 %d frames, 69420 ignored %d\n",
+        with_reset.frames_stage[0],
+        with_reset.frames_stage[1],
+        with_reset.config_complete_ignored);
+    ios_client_report(&with_reset);
+
+    /* Without the reset, Step 2 reads the old batch, and its config_complete
+     * 69420 arrives while no refresh owns it. */
+    ASSERT_TRUE(without_reset.frames_stage[0] > 0);
+    ASSERT_TRUE(without_reset.config_complete_ignored > first_connect.config_complete_ignored);
+
+    /* With it, the reconnect is indistinguishable from a first connect. The
+     * paced transport's own duplicate reads of config_complete are ignored
+     * the same number of times in both. */
+    ASSERT_EQ_INT(with_reset.frames_stage[0], 0);
+    ASSERT_EQ_INT(with_reset.frames_stage[1], first_connect.frames_stage[1]);
+    ASSERT_EQ_INT(with_reset.config_complete_ignored, first_connect.config_complete_ignored);
+    ASSERT_EQ_INT(with_reset.decode_failures, 0);
+    ASSERT_EQ_INT(with_reset.queue_refused, 0);
+    ASSERT_TRUE(with_reset.frames_stage[1] > 0);
+    /* Stage one then completes as on a first connect: the flow gets past
+     * Step 3, and anything it fails at is Step 6, the version rule. */
+    ASSERT_TRUE(with_reset.failed_step == 0 || with_reset.failed_step >= 6);
 }
 
 /* A received mesh packet forwarded after connect is drained on its doorbell
@@ -362,6 +434,6 @@ RUN_TEST(test_requests_the_client_makes_during_stage_one);
 RUN_TEST(test_every_frame_fits_one_read);
 RUN_TEST(test_oversize_frame_disconnects_the_client);
 RUN_TEST(test_paced_flow_reproduces_the_cycle);
-RUN_TEST(test_stale_value_survives_a_reconnect_today);
+RUN_TEST(test_reset_on_disconnect_clears_the_stale_value);
 RUN_TEST(test_forwarded_packet_is_decoded_with_radio_metadata);
 TEST_MAIN_END()
