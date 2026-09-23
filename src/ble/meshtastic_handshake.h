@@ -89,6 +89,10 @@ void handshake_set_session_passkey(Handshake* h, const uint8_t* passkey);
  * its nonce is 1, which the firmware treats as a NodeInfo broadcast trigger
  * and does not answer. Both return true: the heartbeat was understood.
  *
+ * A ToRadio.packet that is not an admin request but carries a MeshPacket.id
+ * gets one queueStatus with that id as mesh_packet_id, the firmware's
+ * acknowledgement that it took the packet.
+ *
  * An unknown nonce is rejected rather than guessed at. Replying to a stage the
  * app did not ask for makes it discard the response and stall. */
 bool handshake_handle_to_radio(

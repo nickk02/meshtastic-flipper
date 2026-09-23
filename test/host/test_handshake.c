@@ -559,6 +559,84 @@ TEST(test_heartbeat_does_not_move_the_stage) {
     ASSERT_EQ_INT(handshake_stage(&h), HandshakeComplete);
 }
 
+/* Any other packet from the phone is acknowledged with a queueStatus carrying
+ * its id, MeshService.cpp sendToMesh. */
+
+static size_t make_text_message(uint32_t packet_id, uint8_t* buf, size_t cap) {
+    uint8_t data[32];
+    uint8_t packet[64];
+    PbWriter w;
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, 1, 1); /* portnum TEXT_MESSAGE_APP */
+    pb_write_string_field(&w, 2, "hi");
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, 2, 0xFFFFFFFFu); /* to broadcast */
+    pb_write_submessage(&w, 4, data, data_len);
+    pb_write_fixed32_field_always(&w, 6, packet_id);
+    size_t packet_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_PACKET, packet, packet_len);
+    return pb_writer_len(&w);
+}
+
+TEST(test_text_message_gets_queue_status_with_its_id) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[96];
+    uint64_t value = 0;
+
+    handshake_init(&h, &id);
+    size_t len = make_text_message(0x01020304u, to_radio, sizeof(to_radio));
+
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+    ASSERT_EQ_INT(reply.messages[0].data[1], reply.messages[0].len - 2);
+
+    const uint8_t* qs = reply.messages[0].data + 2;
+    size_t qs_len = reply.messages[0].len - 2;
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 4, &value));
+    ASSERT_EQ_INT(value, 0x01020304u);
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 2, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_FREE_REPORT);
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 3, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_MAXLEN_REPORT);
+    ASSERT_TRUE(!has_varint_field(qs, qs_len, 1, &value));
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeIdle);
+}
+
+TEST(test_malformed_packet_gets_nothing) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[96];
+
+    handshake_init(&h, &id);
+    size_t len = make_text_message(0x01020304u, to_radio, sizeof(to_radio));
+    /* Cut the id short: the packet's declared length no longer fits. */
+    ASSERT_TRUE(!handshake_handle_to_radio(&h, to_radio, len - 2, &reply));
+    ASSERT_EQ_INT(reply.count, 0);
+}
+
+TEST(test_admin_packet_gets_admin_reply_not_queue_status) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[128];
+
+    handshake_init(&h, &id);
+    size_t len = make_get_owner(0xAABBCCDDu, 0x11223344u, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    /* FromRadio.packet, field 2, not queueStatus. */
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_PACKET << 3) | 2);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_starts_idle);
 RUN_TEST(test_stage_one_follows_the_firmware_order);
@@ -583,4 +661,7 @@ RUN_TEST(test_heartbeat_gets_one_queue_status);
 RUN_TEST(test_heartbeat_without_nonce_is_answered);
 RUN_TEST(test_heartbeat_nonce_one_gets_nothing);
 RUN_TEST(test_heartbeat_does_not_move_the_stage);
+RUN_TEST(test_text_message_gets_queue_status_with_its_id);
+RUN_TEST(test_malformed_packet_gets_nothing);
+RUN_TEST(test_admin_packet_gets_admin_reply_not_queue_status);
 TEST_MAIN_END()
