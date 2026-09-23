@@ -2,7 +2,7 @@
 
 /* How many times each stage two message is queued. See the comment where it
  * is used. */
-#define STAGE_TWO_REPEATS 4
+#define STAGE_TWO_REPEATS 1
 
 /* config.proto, Config.lora. */
 #define CONFIG_VARIANT_LORA 6
@@ -160,23 +160,35 @@ bool handshake_handle_to_radio(
     }
 
     if(nonce == PHONE_NONCE_NODE_INFO) {
-        /* Each message is queued STAGE_TWO_REPEATS times, not once.
+        /* Each message is queued once. STAGE_TWO_REPEATS is 1.
          *
-         * A FAP cannot detect when a phone actually reads a characteristic, so
-         * the drain publishes each queued message for one interval and then
-         * moves on regardless of whether anyone saw it. Once the queue is
-         * empty the timer stops and the value freezes on empty. For a large
-         * batch that is a survivable risk, since a slow reader still has many
-         * messages' worth of window to catch up in. For this two message
-         * batch it was not: the whole thing, including config_complete_id,
-         * the only message that ends the stage, was visible for well under a
-         * second and then gone for good. A device-side log confirmed 0
-         * refused every time, meaning the device believed it had sent
-         * everything while the phone's own UI stayed on "Retrieving nodes"
-         * and then dropped, every cycle, on real hardware.
+         * It was 4, on the theory that a single copy of this two message
+         * batch was visible for well under a second and then gone. It is
+         * not. The drain restates each frame for a full DRAIN_INTERVAL_MS
+         * (350ms), and the iOS client (Meshtastic-Apple v2.7.21) reads in a
+         * tight loop with no delay between reads (BLEConnection.swift
+         * drainPendingPackets, a repeat of read() that only breaks on an
+         * empty value). At the 88ms per read that test/host/ios_client.h
+         * models, every published frame is already read about four times;
+         * even at the 140-150ms per message timed on hardware (see
+         * DRAIN_INTERVAL_MS in meshtastic_service.c) it is read twice.
          *
-         * Repeating each message trades a slightly longer stage two for many
-         * independent chances to be read, rather than exactly one. */
+         * Repeats multiplied that, and each read is a full handler call:
+         *
+         * - handleNodeInfo bumps .retrievingDatabase(nodeCount) on every
+         *   NodeInfo it sees (AccessoryManager+FromRadio.swift:330-333), with
+         *   no check for a node it has already counted. Four copies read
+         *   four times each is why the phone showed "16 nodes" for this one
+         *   node. The host model in test/host/ios_client.h reproduces
+         *   exactly 16.
+         * - Every config_complete_id 69421 runs the NONCE_ONLY_DB branch of
+         *   processFromRadio (AccessoryManager.swift:1165-1190), which
+         *   flushes the deferred saves and batch saves the context. Four
+         *   copies read four times each ran that save 16 times per connect
+         *   in the same model.
+         *
+         * Duplicate reads of the single copy remain, since that is the
+         * transport, but they no longer multiply. */
         for(int i = 0; i < STAGE_TWO_REPEATS; i++) {
             written = phone_encode_node_info(
                 &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
