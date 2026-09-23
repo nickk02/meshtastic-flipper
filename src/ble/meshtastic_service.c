@@ -78,12 +78,28 @@ typedef struct {
     size_t len;
 } QueuedMessage;
 
+/* What a write_queue entry asks the worker to do. A ToRadio write is the
+ * common case. A disconnect is posted by the Bt service's status callback and
+ * travels the same queue, so the reset lands after every write the old session
+ * made and before any write the new one makes. It is a kind of its own rather
+ * than a zero-length write, because an empty ToRadio write is possible and
+ * must not clear the queue. */
+typedef enum {
+    PendingWriteToRadio,
+    PendingWriteDisconnect,
+} PendingWriteKind;
+
 /* A ToRadio write, copied out of the BLE callback so the stack thread can
  * return immediately. */
 typedef struct {
     uint8_t data[QUEUE_MESSAGE_MAX];
     size_t len;
+    PendingWriteKind kind;
 } PendingWrite;
+
+/* Posted by meshtastic_ble_service_on_disconnect. Static so the Bt service
+ * thread, whose stack we do not size, never builds a 200 byte struct on it. */
+static const PendingWrite disconnect_message = {.len = 0, .kind = PendingWriteDisconnect};
 
 #define WRITE_QUEUE_DEPTH 4
 
@@ -659,11 +675,61 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
     if(len > QUEUE_MESSAGE_MAX) len = QUEUE_MESSAGE_MAX;
     memcpy(service->inbound.data, modified->Attr_Data, len);
     service->inbound.len = len;
+    service->inbound.kind = PendingWriteToRadio;
 
     service->stat_writes++;
     furi_message_queue_put(service->write_queue, &service->inbound, 0);
 
     return BleEventAckFlowEnable;
+}
+
+/* The phone went away. Runs on the worker, never on the Bt service thread.
+ *
+ * Without this, a link that drops mid batch leaves the queue stepping and the
+ * last frame published. A phone reconnecting two seconds later (the connect
+ * retry delay) reads that frame in its Step 2 heartbeat drain, before its own
+ * want_config_id is sent, and processes frames from the old session. The
+ * clear in handle_to_radio on want_config_id 69420 comes too late for that
+ * read. test/host/test_ios_client.c models both cases.
+ *
+ * The lock is not held across publish_head, for the same reason as in
+ * drain_step: from_radio_data takes it from inside the update. */
+static void reset_session(MeshtasticBleService* service) {
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    size_t dropped = service->pending;
+    /* A status callback also arrives when advertising starts or drops to low
+     * power with no phone involved. Only a reset that clears something is
+     * logged, so the line means a session really ended. */
+    bool had_session = dropped > 0 || service->drain_active ||
+                       handshake_stage(&service->handshake) != HandshakeIdle;
+    service->head = 0;
+    service->tail = 0;
+    service->pending = 0;
+    service->drain_active = false;
+    service->doorbell_rung = false;
+    handshake_reset(&service->handshake);
+    furi_mutex_release(service->mutex);
+
+    /* With pending at 0 this stores a zero-length value, so the next phone's
+     * first read ends its drain instead of returning an old frame. */
+    publish_head(service, false);
+
+    if(had_session) {
+        FURI_LOG_I(
+            TAG, "phone disconnected, queue cleared (%u pending dropped)", (unsigned)dropped);
+    }
+}
+
+void meshtastic_ble_service_on_disconnect(MeshtasticBleService* service) {
+    if(service == NULL) return;
+
+    /* Called on the Bt service thread. It must not take the service mutex,
+     * which the worker may hold while inside the BLE stack, and must not wait,
+     * so it only posts. If the queue is full, the want_config_id 69420 clear
+     * in handle_to_radio is still there as the fallback. */
+    if(furi_message_queue_put(service->write_queue, &disconnect_message, 0) != FuriStatusOk) {
+        FURI_LOG_W(TAG, "write queue full, disconnect reset not posted");
+    }
 }
 
 /* 350ms per drain step, set from a device-side measurement.
@@ -707,7 +773,11 @@ static int32_t ble_worker(void* context) {
     while(service->worker_running) {
         if(furi_message_queue_get(service->write_queue, &write, WORKER_POLL_MS) == FuriStatusOk) {
             if(!service->worker_running) break;
-            handle_to_radio(service, write.data, write.len);
+            if(write.kind == PendingWriteDisconnect) {
+                reset_session(service);
+            } else {
+                handle_to_radio(service, write.data, write.len);
+            }
         }
         if(!service->worker_running) break;
 
