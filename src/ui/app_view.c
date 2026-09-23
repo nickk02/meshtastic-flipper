@@ -340,13 +340,15 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
     snprintf(line, sizeof(line), "Stage:%s N:%lu", stage, (unsigned long)st.last_nonce);
     canvas_draw_str(canvas, 2, BODY_TOP + ROW_H, line);
 
+    /* Rf is frames refused because the queue was full. */
     snprintf(
         line,
         sizeof(line),
-        "Q:%lu Dr:%lu Now:%lu",
+        "Q:%lu Dr:%lu Now:%lu Rf:%lu",
         (unsigned long)st.queued,
         (unsigned long)st.drained,
-        (unsigned long)st.pending);
+        (unsigned long)st.pending,
+        (unsigned long)st.refused);
     canvas_draw_str(canvas, 2, BODY_TOP + 2 * ROW_H, line);
 
     /* Handles the stack gave the three characteristics. A zero for R or N
