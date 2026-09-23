@@ -472,29 +472,16 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
              * new session, which is exactly what turned into "queue full,
              * reply 31 of 36 dropped" on real hardware.
              *
-             * One unsent queueStatus is kept. The firmware holds a heartbeat's
-             * answer across want_config (heartbeatReceived is cleared only by
-             * close(), PhoneAPI.cpp:411, or by sending it, :581), so the phone
-             * reads it first in stage one. iOS sends that heartbeat at Step 2
-             * right before this request, so without this its answer is
-             * dropped every time it has not been drained yet. */
+             * The reply to the Step 2 heartbeat goes with it. The firmware
+             * would keep it (heartbeatReceived survives want_config,
+             * PhoneAPI.cpp:411 and :581), but the iOS client never waits for
+             * a queueStatus on BLE, and this reset is hardware-verified, so
+             * it stays a plain clear. */
             furi_mutex_acquire(service->mutex, FuriWaitForever);
-            size_t keep = QUEUE_DEPTH;
-            for(size_t i = 0; i < service->pending; i++) {
-                size_t idx = (service->tail + i) % QUEUE_DEPTH;
-                if(service->queue[idx].len > 0 &&
-                   service->queue[idx].data[0] == ((FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2)) {
-                    keep = idx;
-                }
-            }
-            if(keep != QUEUE_DEPTH && keep != 0) {
-                memcpy(&service->queue[0], &service->queue[keep], sizeof(QueuedMessage));
-            }
-            service->head = keep != QUEUE_DEPTH ? 1 : 0;
+            service->head = 0;
             service->tail = 0;
-            service->pending = service->head;
-            service->drain_active = service->pending > 0;
-            service->drain_due_tick = furi_get_tick();
+            service->pending = 0;
+            service->drain_active = false;
             service->doorbell_rung = false;
             furi_mutex_release(service->mutex);
         }
