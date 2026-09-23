@@ -504,6 +504,7 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
          * three requests a real phone sends (canned messages, ringtone,
          * set_config) are the same three seen here, and in what order. */
         PhoneAdminRequest admin_probe;
+        uint32_t packet_id = 0;
         if(phone_decode_admin_request(data, len, &admin_probe)) {
             FURI_LOG_I(
                 TAG,
@@ -511,6 +512,12 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
                 (unsigned long)admin_probe.admin_field,
                 (int)admin_probe.want_response,
                 (unsigned long)admin_probe.packet_id);
+        } else if(phone_decode_packet_id(data, len, &packet_id)) {
+            /* Any other packet, such as a text message. The handshake answers
+             * it with a queueStatus carrying this id, as the firmware does. */
+            understood = true;
+            FURI_LOG_I(
+                TAG, "ToRadio packet id=%08lx, queueing queueStatus", (unsigned long)packet_id);
         }
     }
 
