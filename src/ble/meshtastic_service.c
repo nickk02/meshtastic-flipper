@@ -62,9 +62,26 @@
  * message the phone would read truncated and disconnect over. */
 #define QUEUE_MESSAGE_MAX PHONE_FRAME_MAX
 
-/* Declared value length for ToRadio. The phone's handshake writes are a few
- * bytes; this is headroom, not a target. */
-#define TO_RADIO_VALUE_MAX 128
+/* Declared value length for ToRadio, and the size of the buffer a write is
+ * copied into. The declared length is the most the stack will store for the
+ * attribute, so the buffer is the same size.
+ *
+ * The firmware sizes ToRadio at MAX_TO_FROM_RADIO_SIZE, 512 (PhoneAPI.h:19),
+ * but that is its own buffer, not what the phone sends. The largest ToRadio
+ * the phone sends during connect is the set_config tzdef write, well under
+ * 120 bytes. After connect it sends set_owner, about 90 bytes with a 40
+ * character long name, and set_config, whose Config is at most 207 bytes
+ * (meshtastic_Config_size, config.pb.h:1160), about 241 bytes once wrapped in
+ * AdminMessage, Data, MeshPacket and ToRadio. 128 did not hold the last.
+ *
+ * 243 rather than 256. aci_gatt_attribute_modified_event_rp0 carries at most
+ * (BLE_EVT_MAX_PARAM_LEN - 2) - 8 = 245 value bytes (ble_types.h:3243, with
+ * HCI_EVENT_MAX_PARAM_LEN 255 at ble_std.h:37). A longer value reaches the
+ * event handler split across events. At 243 every write the stack accepts
+ * arrives in one event, and it is the length the firmware's own serial
+ * service gives the characteristic a phone writes to,
+ * BLE_SVC_SERIAL_CHAR_VALUE_LEN_MAX in services/serial_service.h. */
+#define TO_RADIO_VALUE_MAX 243
 
 /* If a handshake reply could ever exceed the declared FromRadio length, the
  * queue would silently refuse it and the phone would wait forever for a message
@@ -90,11 +107,16 @@ typedef enum {
 } PendingWriteKind;
 
 /* A ToRadio write, copied out of the BLE callback so the stack thread can
- * return immediately. */
+ * return immediately. oversize_len is nonzero when the value did not fit in
+ * data: the write is then dropped, and the worker logs it, because the event
+ * handler runs on the stack's thread and must not. events counts the
+ * attribute-modified events the value arrived in. */
 typedef struct {
-    uint8_t data[QUEUE_MESSAGE_MAX];
+    uint8_t data[TO_RADIO_VALUE_MAX];
     size_t len;
     PendingWriteKind kind;
+    uint16_t oversize_len;
+    uint8_t events;
 } PendingWrite;
 
 /* Posted by meshtastic_ble_service_on_disconnect. Static so the Bt service
@@ -151,6 +173,8 @@ struct MeshtasticBleService {
      * rate-limits the log line so a burst cannot flood it. */
     uint32_t stat_refused;
     uint32_t refused_run;
+    /* ToRadio writes dropped because they did not fit TO_RADIO_VALUE_MAX. */
+    uint32_t stat_write_oversize;
 
     /* ToRadio writes arrive on the BLE stack's thread. They are copied here
      * and handled on a thread of our own.
@@ -167,7 +191,8 @@ struct MeshtasticBleService {
 
     /* Staging for one inbound write. Owned here for the same reason as reply
      * below: the event handler runs on the BLE stack's thread and this struct
-     * is 260 bytes, too much to put on a stack we do not size. */
+     * is about 250 bytes, too much to put on a stack we do not size. It also
+     * holds a value that arrives in more than one event while it is rebuilt. */
     PendingWrite inbound;
 
     Handshake handshake;
@@ -297,7 +322,17 @@ static const BleGattCharacteristicParams to_radio_params = {
     .data.callback.context = NULL,
     .uuid.Char_UUID_128 = UUID_REVERSED_TORADIO,
     .uuid_type = UUID_TYPE_128,
-    .char_properties = CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RESP,
+    /* Write with response only. Meshtastic-Apple v2.7.21 BLEConnection.swift
+     * send() picks .withoutResponse whenever the characteristic offers it
+     * (line 533), so offering both meant every ToRadio went without response.
+     * That write is fire and forget, limited to MTU minus 3 (182 bytes at MTU
+     * 185): performWrite() logs "EXCEEDS negotiated limit" (line 588) and the
+     * phone learns nothing else. With response, CoreBluetooth turns a value
+     * above that limit into a long write (prepare and execute), and every
+     * write gets an ATT response. A refusal then reaches didWriteValueFor,
+     * and send() retries CBATTError.insufficientResources with backoff
+     * (lines 534-570) instead of the write vanishing. */
+    .char_properties = CHAR_PROP_WRITE,
     .security_permissions = ATTR_PERMISSION_NONE,
     .gatt_evt_mask = GATT_NOTIFY_ATTRIBUTE_WRITE,
     .is_variable = CHAR_VALUE_LEN_VARIABLE,
@@ -504,10 +539,29 @@ static void hex_prefix(const uint8_t* data, size_t len, char* out, size_t out_le
     out[n] = 0;
 }
 
-static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, size_t len) {
+static void handle_to_radio(MeshtasticBleService* service, const PendingWrite* write) {
+    const uint8_t* data = write->data;
+    size_t len = write->len;
     uint32_t nonce = 0;
     bool understood = false;
     char hex[3 * 40 + 1];
+
+    /* Logged here, not where it was detected: that was the stack's thread. */
+    if(write->oversize_len > 0) {
+        FURI_LOG_E(
+            TAG,
+            "ToRadio write of %u bytes exceeds %u, dropped",
+            (unsigned)write->oversize_len,
+            (unsigned)TO_RADIO_VALUE_MAX);
+        return;
+    }
+    if(write->events > 1) {
+        FURI_LOG_I(
+            TAG,
+            "ToRadio write of %u bytes arrived in %u events",
+            (unsigned)len,
+            (unsigned)write->events);
+    }
 
     hex_prefix(data, len, hex, sizeof(hex));
 
@@ -669,14 +723,46 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
      * serial_service.c:82-90. */
     if(modified->Attr_Handle != service->to_radio.handle + 1) return BleEventNotAck;
 
-    /* Copy and post. Nothing here may call back into the BLE stack, and
-     * nothing here may be large: this is the stack thread's stack. */
-    size_t len = modified->Attr_Data_Length;
-    if(len > QUEUE_MESSAGE_MAX) len = QUEUE_MESSAGE_MAX;
-    memcpy(service->inbound.data, modified->Attr_Data, len);
-    service->inbound.len = len;
-    service->inbound.kind = PendingWriteToRadio;
+    /* Copy and post. Nothing here may call back into the BLE stack, nothing
+     * here may be large, and nothing here may log: this is the stack thread.
+     *
+     * Offset, per ble_events.h: bits 14-0 are where this piece of the value
+     * starts, and bit 15 set means more events follow for the same value.
+     * At TO_RADIO_VALUE_MAX 243 a whole value fits one event (see there), so
+     * a write normally arrives once, with Offset 0. The stack documentation
+     * does not say whether a long write (prepare and execute) is reported
+     * once, reassembled, or once per prepared piece. Either way each piece is
+     * placed at its offset, and the value is posted when bit 15 is clear.
+     * If the stack reports per piece, the first piece is also posted on its
+     * own, fails to parse, and is logged as not understood; the complete
+     * value follows. The phone gives no total length, so there is nothing
+     * better to wait for. The copy is bounded by the buffer either way. */
+    uint16_t offset = modified->Offset & 0x7FFF;
+    bool more = (modified->Offset & 0x8000) != 0;
+    size_t end = (size_t)offset + modified->Attr_Data_Length;
 
+    if(offset == 0) {
+        service->inbound.len = 0;
+        service->inbound.oversize_len = 0;
+        service->inbound.events = 0;
+        service->inbound.kind = PendingWriteToRadio;
+    }
+    if(service->inbound.events < UINT8_MAX) service->inbound.events++;
+
+    if(end > TO_RADIO_VALUE_MAX) {
+        /* Never truncate: a cut protobuf can still parse as something else.
+         * Record how far the value reached and drop it. */
+        if(end > service->inbound.oversize_len) {
+            service->inbound.oversize_len = end > UINT16_MAX ? UINT16_MAX : (uint16_t)end;
+        }
+    } else if(service->inbound.oversize_len == 0) {
+        memcpy(service->inbound.data + offset, modified->Attr_Data, modified->Attr_Data_Length);
+        service->inbound.len = end;
+    }
+
+    if(more) return BleEventAckFlowEnable;
+
+    if(service->inbound.oversize_len > 0) service->stat_write_oversize++;
     service->stat_writes++;
     furi_message_queue_put(service->write_queue, &service->inbound, 0);
 
@@ -776,7 +862,7 @@ static int32_t ble_worker(void* context) {
             if(write.kind == PendingWriteDisconnect) {
                 reset_session(service);
             } else {
-                handle_to_radio(service, write.data, write.len);
+                handle_to_radio(service, &write);
             }
         }
         if(!service->worker_running) break;
@@ -901,6 +987,7 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
         snap->wrong_ecode = service->stat_wrong_ecode;
         snap->last_attr_handle = service->stat_last_attr_handle;
         snap->refused = service->stat_refused;
+        snap->write_oversize = service->stat_write_oversize;
         snap->to_radio_handle = (uint16_t)(service->to_radio.handle + 1);
         snap->from_radio_handle = service->from_radio.handle;
         snap->from_num_handle = service->from_num.handle;
