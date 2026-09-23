@@ -1146,10 +1146,11 @@ static inline void
     c->read_rtt_ms = IOS_MODEL_READ_RTT_MS;
 }
 
-/* Model the GAP link dropping. The device keeps its queue and its published
- * value, because today nothing on the device side observes a disconnect.
- * The client forgets everything, because AccessoryManager.connect() clears
- * its state on every attempt. */
+/* Model the GAP link dropping, client side only. The device keeps its queue
+ * and its published value until ios_device_reset is called, so a test can
+ * show the device with and without its disconnect hook. The client forgets
+ * everything, because AccessoryManager.connect() clears its state on every
+ * attempt. */
 static inline void ios_client_disconnect(IosClient* c) {
     c->refresh_active = false;
     c->have_my_info = false;
@@ -1166,13 +1167,13 @@ static inline void ios_client_disconnect(IosClient* c) {
     c->failed_step = 0;
     c->failure[0] = 0;
     c->doorbell_pending = false;
-    /* handshake_reset is what a disconnect hook would call. The service does
-     * not call it today; the stage is left as it was. */
+    /* The handshake stage is left as it was; ios_device_reset clears it. */
 }
 
-/* Model the device side of a reconnect done right: the queue and the
- * published value are cleared. This is what the reset-on-disconnect change
- * is for; the harness offers it so a test can show the difference. */
+/* Model the device's disconnect hook: the queue and the published value are
+ * cleared and the handshake returns to idle. This is reset_session in
+ * meshtastic_service.c, reached through meshtastic_ble_service_on_disconnect
+ * from the Bt status callback. */
 static inline void ios_device_reset(IosClient* c) {
     c->q_tail = 0;
     c->q_pending = 0;
