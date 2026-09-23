@@ -31,6 +31,8 @@
 #include <stdint.h>
 
 #include "src/model/mesh_config.h"
+#include "src/model/node_roster.h"
+#include "src/proto/mesh_decode.h"
 
 /* FromRadio field numbers. mesh.proto, message FromRadio. */
 #define FROMRADIO_FIELD_PACKET             2
@@ -198,6 +200,75 @@ size_t phone_encode_queue_status(
     uint32_t free_slots,
     uint32_t maxlen,
     uint32_t mesh_packet_id,
+    uint8_t* out,
+    size_t out_len);
+
+/* Largest FromRadio this device may hand the phone in one read.
+ *
+ * The phone reads FromRadio with one ATT read, which returns at most the ATT
+ * MTU minus the one byte opcode. The iOS client model puts that at 185 - 1
+ * (IOS_READ_MAX, test/host/ios_client.h). A longer frame comes back truncated,
+ * FromRadioDecoder.classify reports .failed and BLEConnection disconnects, so
+ * a frame that would not fit is not built at all. */
+#define PHONE_READ_MAX 184
+
+/* A packet this device received off the air and decrypted, as the phone
+ * should see it. Everything here is taken from the frame header and the
+ * decrypted Data; nothing is invented. */
+typedef struct {
+    uint32_t from;
+    uint32_t to;
+    uint32_t id;
+    /* Channel INDEX, not the hash on the air. Router.cpp perhapsDecode sets
+     * p->channel = chIndex once decryption succeeds. 0 is the primary. */
+    uint32_t channel;
+    uint32_t portnum;
+    const uint8_t* payload;
+    size_t payload_len;
+    /* Unix seconds, or 0 when this device has no trusted clock. */
+    uint32_t rx_time;
+    float rx_snr;
+    int32_t rx_rssi;
+    uint8_t hop_limit;
+    uint8_t hop_start;
+    bool want_ack;
+} PhoneRxPacket;
+
+/* FromRadio { packet { MeshPacket } } for a received packet, with the payload
+ * carried as decoded Data.
+ *
+ * Returns 0 when the frame would exceed PHONE_READ_MAX or out_len, so the
+ * caller can log a drop rather than hand the phone a truncated read. */
+size_t phone_encode_rx_packet(const PhoneRxPacket* p, uint8_t* out, size_t out_len);
+
+/* Fill a PhoneRxPacket from what the receive path decoded.
+ *
+ * Returns false when the packet is not for the phone: anything that did not
+ * decrypt and parse as Data, and portnum 0, which Router.cpp perhapsDecode
+ * treats as a wrong key. MESH_ERR_NOT_TEXT is a clean decode of a portnum
+ * this app does not render itself, and the phone does, so it goes.
+ *
+ * The payload points into d, so d must outlive the packet. rx_time is left
+ * 0; see the caller. */
+bool phone_rx_packet_from_decoded(
+    const MeshDecoded* d,
+    MeshDecodeResult result,
+    float rx_snr,
+    int32_t rx_rssi,
+    PhoneRxPacket* out);
+
+/* FromRadio { node_info { ... } } for a node heard on the air, as the firmware
+ * sends it during STATE_SEND_OTHER_NODEINFOS.
+ *
+ * user always carries at least id "!xxxxxxxx", so a node whose NODEINFO_APP
+ * has not arrived yet still has a user record; names are added when known.
+ * last_heard_unix is Unix seconds, or 0 to let the phone use its own clock
+ * (MeshPackets.swift nodeInfoPacket falls back to Date() for 0).
+ *
+ * For other nodes only. The own node goes through phone_encode_node_info. */
+size_t phone_encode_other_node_info(
+    const MeshNode* node,
+    uint32_t last_heard_unix,
     uint8_t* out,
     size_t out_len);
 

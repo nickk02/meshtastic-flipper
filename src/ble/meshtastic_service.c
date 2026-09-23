@@ -198,6 +198,14 @@ struct MeshtasticBleService {
     Handshake handshake;
     MeshConfig config;
 
+    /* The app's live roster and the mutex that guards it, and the copy the
+     * handshake actually reads. The live one is written by the radio thread,
+     * so it is copied under the app's mutex when stage two is asked for, and
+     * the handshake only ever sees the copy. The copy belongs to the worker. */
+    const NodeRoster* roster_source;
+    FuriMutex* roster_mutex;
+    NodeRoster roster_copy;
+
     /* Owned here rather than declared in the event handler. That handler runs
      * on the BLE stack's thread, whose stack we neither size nor control, and
      * HandshakeReply is 408 bytes. A local that large on a foreign thread is
@@ -508,6 +516,46 @@ bool meshtastic_ble_service_is_connected(MeshtasticBleService* service) {
     return service != NULL && handshake_is_complete(&service->handshake);
 }
 
+void meshtastic_ble_service_set_roster(
+    MeshtasticBleService* service,
+    const NodeRoster* roster,
+    FuriMutex* roster_mutex) {
+    if(service == NULL) return;
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    service->roster_source = roster;
+    service->roster_mutex = roster_mutex;
+    furi_mutex_release(service->mutex);
+}
+
+/* Copies the app's roster for stage two. Runs on the worker.
+ *
+ * Only the app's mutex is held while copying, never together with the
+ * service mutex, so there is no lock order to get wrong against the radio
+ * thread, which takes the app's mutex and then, separately, queue(). */
+static void snapshot_roster(MeshtasticBleService* service) {
+    const NodeRoster* source;
+    FuriMutex* lock;
+
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    source = service->roster_source;
+    lock = service->roster_mutex;
+    furi_mutex_release(service->mutex);
+
+    if(source == NULL || lock == NULL) {
+        node_roster_init(&service->roster_copy);
+    } else {
+        furi_mutex_acquire(lock, FuriWaitForever);
+        service->roster_copy = *source;
+        furi_mutex_release(lock);
+    }
+    handshake_set_roster(&service->handshake, &service->roster_copy);
+
+    FURI_LOG_I(
+        TAG,
+        "stage two: %u heard nodes in the roster",
+        (unsigned)node_roster_count(&service->roster_copy));
+}
+
 void meshtastic_ble_service_set_callback(
     MeshtasticBleService* service,
     MeshtasticBleToRadioCallback callback,
@@ -591,6 +639,8 @@ static void handle_to_radio(MeshtasticBleService* service, const PendingWrite* w
             service->drain_active = false;
             service->doorbell_rung = false;
             furi_mutex_release(service->mutex);
+        } else if(nonce == PHONE_NONCE_NODE_INFO) {
+            snapshot_roster(service);
         }
     } else if(phone_decode_heartbeat(data, len, &nonce)) {
         /* The settle heartbeat between stages. The firmware answers it with

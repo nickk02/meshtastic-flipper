@@ -2,7 +2,7 @@
 
 /* How many times each stage two message is queued. See the comment where it
  * is used. */
-#define STAGE_TWO_REPEATS 1
+#define STAGE_TWO_REPEATS HANDSHAKE_STAGE_TWO_REPEATS
 
 /* config.proto, Config.device and Config.lora. */
 #define CONFIG_VARIANT_DEVICE 1
@@ -23,6 +23,11 @@ void handshake_init(Handshake* h, const MeshConfig* config) {
         phone_identity_from_config(config, &h->identity);
     }
     h->stage = HandshakeIdle;
+}
+
+void handshake_set_roster(Handshake* h, const NodeRoster* roster) {
+    if(h == NULL) return;
+    h->roster = roster;
 }
 
 void handshake_set_session_passkey(Handshake* h, const uint8_t* passkey) {
@@ -236,6 +241,29 @@ bool handshake_handle_to_radio(
             written = phone_encode_node_info(
                 &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
             if(!push(reply, written)) return false;
+        }
+
+        /* STATE_SEND_OTHER_NODEINFOS in PhoneAPI.cpp: after the own NodeInfo,
+         * one NodeInfo per node in the database, then config_complete. Only
+         * under 69421 here; the firmware skips this state for 69420, and so
+         * does stage one above. Each is sent once rather than repeated: the
+         * repeats exist to widen a two message batch, and a batch carrying
+         * heard nodes is already longer. Index 0 is the most recently heard,
+         * so the cap drops the stalest. A node that fails to encode is skipped
+         * rather than ending the stage, since config_complete must still go. */
+        size_t others = 0;
+        size_t heard = h->roster ? node_roster_count(h->roster) : 0;
+        for(size_t i = 0; i < heard && others < HANDSHAKE_MAX_OTHER_NODES; i++) {
+            const MeshNode* node = node_roster_get(h->roster, i);
+            if(node == NULL || node->node_num == 0) continue;
+            if(node->node_num == h->identity.node_num) continue;
+            /* last_heard 0: the roster only has a tick, and the phone fills
+             * in its own clock for 0 (MeshPackets.swift nodeInfoPacket). */
+            written = phone_encode_other_node_info(
+                node, 0, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            if(written == 0) continue;
+            if(!push(reply, written)) return false;
+            others++;
         }
 
         for(int i = 0; i < STAGE_TWO_REPEATS; i++) {

@@ -12,12 +12,19 @@
 #define MYNODEINFO_FIELD_PIO_ENV         13
 
 /* NodeInfo field numbers. mesh.proto, message NodeInfo. */
-#define NODEINFO_FIELD_NUM       1
+#define NODEINFO_FIELD_NUM         1
 /* mesh.proto MeshPacket. from, to and id are fixed32, not varint. */
-#define MESHPACKET_FIELD_FROM    1
-#define MESHPACKET_FIELD_TO      2
-#define MESHPACKET_FIELD_DECODED 4
-#define MESHPACKET_FIELD_ID      6
+#define MESHPACKET_FIELD_FROM      1
+#define MESHPACKET_FIELD_TO        2
+#define MESHPACKET_FIELD_CHANNEL   3
+#define MESHPACKET_FIELD_DECODED   4
+#define MESHPACKET_FIELD_ID        6
+#define MESHPACKET_FIELD_RX_TIME   7
+#define MESHPACKET_FIELD_RX_SNR    8
+#define MESHPACKET_FIELD_HOP_LIMIT 9
+#define MESHPACKET_FIELD_WANT_ACK  10
+#define MESHPACKET_FIELD_RX_RSSI   12
+#define MESHPACKET_FIELD_HOP_START 15
 
 /* mesh.proto Data. dest, source and request_id are fixed32. */
 #define DATA_FIELD_PORTNUM       1
@@ -33,7 +40,10 @@
 #define ADMIN_FIELD_GET_OWNER_RESPONSE 4
 #define ADMIN_FIELD_SESSION_PASSKEY    101
 
-#define NODEINFO_FIELD_USER 2
+#define NODEINFO_FIELD_USER       2
+#define NODEINFO_FIELD_SNR        4
+#define NODEINFO_FIELD_LAST_HEARD 5
+#define NODEINFO_FIELD_HOPS_AWAY  9
 
 /* mesh.proto, message DeviceMetadata. */
 #define METADATA_FIELD_FIRMWARE_VERSION     1
@@ -201,6 +211,152 @@ size_t phone_encode_queue_status(
     pb_write_submessage(&frame, FROMRADIO_FIELD_QUEUE_STATUS, body, pb_writer_len(&inner));
 
     return pb_writer_ok(&frame) ? pb_writer_len(&frame) : 0;
+}
+
+/* A float's IEEE 754 bits, for a wire type 5 field. memcpy rather than a
+ * pointer cast, so strict aliasing cannot reorder it. */
+static uint32_t float_bits(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+size_t phone_encode_rx_packet(const PhoneRxPacket* p, uint8_t* out, size_t out_len) {
+    uint8_t data[PHONE_READ_MAX];
+    uint8_t packet[PHONE_READ_MAX];
+    PbWriter w;
+
+    if(p == NULL || out == NULL) return 0;
+    if(p->payload == NULL && p->payload_len > 0) return 0;
+
+    /* Scratch buffers are capped at PHONE_READ_MAX, so a payload that could
+     * never fit in one read fails here rather than being built and dropped. */
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, DATA_FIELD_PORTNUM, p->portnum);
+    pb_write_bytes_field(&w, DATA_FIELD_PAYLOAD, p->payload, p->payload_len);
+    if(!pb_writer_ok(&w)) return 0;
+    size_t data_len = pb_writer_len(&w);
+
+    /* Field numbers and types from mesh.pb.h, MeshPacket. from, to, id and
+     * rx_time are fixed32 and written even when zero: a zero id is still an
+     * id. rx_snr is a float, so wire type 5 carrying its bits. rx_rssi is an
+     * int32 varint, so a negative value is sign extended to ten bytes. */
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_FROM, p->from);
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_TO, p->to);
+    pb_write_varint_field(&w, MESHPACKET_FIELD_CHANNEL, p->channel);
+    pb_write_submessage(&w, MESHPACKET_FIELD_DECODED, data, data_len);
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_ID, p->id);
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_RX_TIME, p->rx_time);
+    pb_write_fixed32_field(&w, MESHPACKET_FIELD_RX_SNR, float_bits(p->rx_snr));
+    pb_write_varint_field(&w, MESHPACKET_FIELD_HOP_LIMIT, p->hop_limit);
+    pb_write_varint_field(&w, MESHPACKET_FIELD_WANT_ACK, p->want_ack ? 1 : 0);
+    /* rx_rssi has explicit presence in the firmware, which marks a real
+     * reading present (SX126xInterface.cpp, has_rx_rssi = true), so it is
+     * written whatever its value. */
+    pb_write_varint_field_always(&w, MESHPACKET_FIELD_RX_RSSI, (uint64_t)(int64_t)p->rx_rssi);
+    pb_write_varint_field(&w, MESHPACKET_FIELD_HOP_START, p->hop_start);
+    if(!pb_writer_ok(&w)) return 0;
+
+    size_t written = phone_encode_packet(packet, pb_writer_len(&w), out, out_len);
+    return written > PHONE_READ_MAX ? 0 : written;
+}
+
+bool phone_rx_packet_from_decoded(
+    const MeshDecoded* d,
+    MeshDecodeResult result,
+    float rx_snr,
+    int32_t rx_rssi,
+    PhoneRxPacket* out) {
+    if(d == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+
+    /* The client dispatches on packet.decoded.portnum (AccessoryManager.swift
+     * processFromRadio, case .packet), so only a packet that decrypted to
+     * valid Data is any use to it. */
+    if(result != MESH_OK && result != MESH_ERR_NOT_TEXT) return false;
+    if(d->data.portnum == 0) return false;
+
+    out->from = d->header.from;
+    out->to = d->header.to;
+    out->id = d->header.id;
+    /* The index of the channel that decrypted it, not the hash on the air.
+     * Only the primary channel is decoded, and that is index 0. */
+    out->channel = 0;
+    out->portnum = d->data.portnum;
+    out->payload = d->data.payload;
+    out->payload_len = d->data.payload_len;
+    out->rx_snr = rx_snr;
+    out->rx_rssi = rx_rssi;
+    /* RadioLibInterface.cpp handleReceiveInterrupt reads both out of the
+     * header flags, which is what these helpers do. */
+    out->hop_limit = mesh_header_hop_limit(&d->header);
+    out->hop_start = mesh_header_hop_start(&d->header);
+    out->want_ack = mesh_header_want_ack(&d->header);
+    return true;
+}
+
+/* Length of a name held in a fixed array, bounded by the array, so a record
+ * that lost its terminator cannot run the writer off the end of it. */
+static size_t name_len(const char* s, size_t cap) {
+    size_t n = 0;
+    while(n < cap && s[n] != 0)
+        n++;
+    return n;
+}
+
+size_t phone_encode_other_node_info(
+    const MeshNode* node,
+    uint32_t last_heard_unix,
+    uint8_t* out,
+    size_t out_len) {
+    char id[PHONE_ID_MAX];
+    uint8_t user[96];
+    uint8_t body[128];
+    PbWriter w;
+
+    if(node == NULL || out == NULL || node->node_num == 0) return 0;
+
+    /* The id is written even for a node with no name yet, so the phone gets a
+     * user record (handleNodeInfo reads nodeInfo.hasUser) and has something to
+     * show. The firmware does the same: STATE_SEND_OTHER_NODEINFOS in
+     * PhoneAPI.cpp rewrites user.id to "!%08x" before sending. hw_model is
+     * left out because the roster does not keep it; 0 is HW_UNSET anyway. */
+    snprintf(id, sizeof(id), "!%08lx", (unsigned long)node->node_num);
+    pb_writer_init(&w, user, sizeof(user));
+    pb_write_string_field(&w, USER_FIELD_ID, id);
+    if(node->has_name) {
+        pb_write_bytes_field(
+            &w,
+            USER_FIELD_LONG_NAME,
+            (const uint8_t*)node->long_name,
+            name_len(node->long_name, sizeof(node->long_name)));
+        pb_write_bytes_field(
+            &w,
+            USER_FIELD_SHORT_NAME,
+            (const uint8_t*)node->short_name,
+            name_len(node->short_name, sizeof(node->short_name)));
+    }
+    if(!pb_writer_ok(&w)) return 0;
+    size_t user_len = pb_writer_len(&w);
+
+    /* mesh.pb.h NodeInfo: snr is a float, last_heard a fixed32, hops_away an
+     * optional uint32. hops_away 0 means a direct neighbour, which is a real
+     * answer, so it is written whenever it is known. */
+    pb_writer_init(&w, body, sizeof(body));
+    pb_write_varint_field_always(&w, NODEINFO_FIELD_NUM, node->node_num);
+    pb_write_submessage(&w, NODEINFO_FIELD_USER, user, user_len);
+    pb_write_fixed32_field(&w, NODEINFO_FIELD_SNR, float_bits((float)node->snr));
+    pb_write_fixed32_field(&w, NODEINFO_FIELD_LAST_HEARD, last_heard_unix);
+    if(node->has_hops) {
+        pb_write_varint_field_always(&w, NODEINFO_FIELD_HOPS_AWAY, node->hops_away);
+    }
+    if(!pb_writer_ok(&w)) return 0;
+    size_t body_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, out, out_len);
+    pb_write_submessage(&w, FROMRADIO_FIELD_NODE_INFO, body, body_len);
+    return pb_writer_ok(&w) ? pb_writer_len(&w) : 0;
 }
 
 /* Reads a base 128 varint and advances *pos. */
