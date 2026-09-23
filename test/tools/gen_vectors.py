@@ -100,6 +100,61 @@ CASES = [
 ]
 
 
+# Whole over-the-air LongFast frames of the shape the receive path sees, for
+# the end-to-end test that decodes one and forwards it to the phone. Each is
+# the 16 byte header followed by AES128-CTR of a Data protobuf, with the
+# nonce from build_nonce and the default key (PSK index 1).
+#
+#   label, portnum, payload, to, from, packet_id, hop_limit, hop_start, relay
+RX_FROM = 0xDEADBEEF
+
+
+def build_user_payload():
+    user = mesh_pb2.User()
+    user.id = "!%08x" % RX_FROM
+    user.long_name = "Vector Node"
+    user.short_name = "VECT"
+    return user.SerializeToString()
+
+
+RX_CASES = [
+    ("TEXT", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+     "hello from a real LongFast frame".encode("utf-8"),
+     0xFFFFFFFF, RX_FROM, 0x1A2B3C4D, 3, 3, RX_FROM & 0xFF),
+    ("NODEINFO", portnums_pb2.PortNum.NODEINFO_APP, build_user_payload(),
+     0xFFFFFFFF, RX_FROM, 0x5E6F7081, 2, 3, RX_FROM & 0xFF),
+]
+
+
+def write_rx_cases(out):
+    key = expand_psk(1)
+    chash = channel_hash("LongFast", key)
+    for (label, portnum, payload, to, frm, pid, hop_limit, hop_start,
+         relay) in RX_CASES:
+        data = mesh_pb2.Data()
+        data.portnum = portnum
+        data.payload = payload
+        plaintext = data.SerializeToString()
+        ciphertext = aes_ctr(key, build_nonce(pid, frm), plaintext)
+        flags = (hop_limit & 0x07) | ((hop_start & 0x07) << 5)
+        frame = build_header(to, frm, pid, flags, chash, 0, relay) + ciphertext
+        assert len(frame) <= 184, "an RX vector must fit one phone read"
+
+        p = "RXVEC_%s_" % label
+        out.write("/* over-the-air frame: %s */\n" % label.lower())
+        out.write("#define %sPACKET_ID 0x%08xu\n" % (p, pid))
+        out.write("#define %sFROM_NODE 0x%08xu\n" % (p, frm))
+        out.write("#define %sTO_NODE 0x%08xu\n" % (p, to))
+        out.write("#define %sHOP_LIMIT %d\n" % (p, hop_limit))
+        out.write("#define %sHOP_START %d\n" % (p, hop_start))
+        out.write("#define %sCHANNEL_HASH 0x%02xu\n" % (p, chash))
+        out.write("#define %sPORTNUM %d\n" % (p, portnum))
+        out.write(c_bytes(p + "PAYLOAD", payload))
+        out.write("#define %sPAYLOAD_LEN %d\n" % (p, len(payload)))
+        out.write(c_bytes(p + "FRAME", frame))
+        out.write("#define %sFRAME_LEN %d\n\n" % (p, len(frame)))
+
+
 def build_case(case):
     """Compute every derived value for one case."""
     (label, text, to, frm, pid, hop_limit, hop_start, psk_index, chan_name) = case
@@ -182,6 +237,7 @@ def main():
         out.write(c_bytes(p + "TEXT", raw))
         out.write("#define %sTEXT_LEN %d\n\n" % (p, len(raw)))
 
+    write_rx_cases(out)
     out.write("#endif\n")
 
 

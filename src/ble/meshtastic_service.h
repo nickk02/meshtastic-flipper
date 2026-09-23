@@ -33,6 +33,16 @@ void meshtastic_ble_service_set_callback(
     MeshtasticBleToRadioCallback callback,
     void* context);
 
+/* Where stage two finds the nodes heard on the air.
+ *
+ * roster is the app's own, written by the radio thread under roster_mutex.
+ * The service copies it under that mutex when the phone asks for stage two,
+ * and the handshake reads only the copy, so no name can be read half written. */
+void meshtastic_ble_service_set_roster(
+    MeshtasticBleService* service,
+    const NodeRoster* roster,
+    FuriMutex* roster_mutex);
+
 /* Queue a FromRadio message for the phone to read.
  *
  * Returns false when the queue is full. Dropping is preferable to blocking the
