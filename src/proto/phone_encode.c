@@ -46,8 +46,24 @@
  * The app parses it as a version string and uses it to decide whether the
  * device is supported. It is a claim about protocol compatibility, not about
  * this being Meshtastic firmware, and it is deliberately a version whose phone
- * protocol this app actually implements. */
-#define PHONE_FIRMWARE_VERSION "2.5.0"
+ * protocol this app actually implements.
+ *
+ * Four dotted parts, and at least 2.5.18 once the last part is dropped.
+ * Meshtastic-Apple v2.7.21 connect Step 6 takes everything before the last
+ * "." (AccessoryManager+Connect.swift), so a build suffix is expected and
+ * this reads as "2.6.11". It then compares that against minimumVersion,
+ * "2.5.18" (AccessoryManager.swift:128), and throws connectionFailed when it
+ * is lower. Step 0 calls closeConnection() before each retry, so a failure
+ * here shows up on the device as a phone-initiated disconnect (HCI 0x13)
+ * every few seconds, with maxRetries 2 and retryDelay 2s.
+ *
+ * The old value "2.5.0" had three parts and read as "2.5", below the floor.
+ *
+ * Ceiling: stay under 2.7.4 until this build answers ToRadio.heartbeat with a
+ * FromRadio.queueStatus. From 2.7.4 the app arms a heartbeat response
+ * watchdog (AccessoryManager.swift, checkIsVersionSupported("2.7.4")). That
+ * watchdog is TCP/serial only today, but do not lean on that. */
+#define PHONE_FIRMWARE_VERSION "2.6.11.flipper"
 
 /* device_state_version tracks the on-device database layout. The app only
  * compares it, so any stable value works; this one matches what the 2.5 series
