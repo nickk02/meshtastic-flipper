@@ -127,6 +127,16 @@ TEST(test_stage_one_follows_the_firmware_order) {
         ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_CONFIG);
     }
 
+    /* The first config variant is Config.device (field 1), and its body is not
+     * empty: it carries tzdef, so the iOS app has no reason to write one back.
+     * Bytes: FromRadio.config tag, length, Config.device tag, body length. */
+    ASSERT_TRUE(reply.messages[12].len > 4);
+    ASSERT_EQ_INT(reply.messages[12].data[2] >> 3, 1);
+    ASSERT_EQ_INT(reply.messages[12].data[2] & 0x07, 2);
+    ASSERT_TRUE(reply.messages[12].data[3] > 0);
+    ASSERT_TRUE(memmem_present(
+        reply.messages[12].data, reply.messages[12].len, (const uint8_t*)"UTC0", 4));
+
     for(size_t i = 22; i < 22 + PHONE_MODULECONFIG_VARIANTS; i++) {
         ASSERT_TRUE(reply.messages[i].len > 0);
         ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_MODULECONFIG);

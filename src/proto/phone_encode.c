@@ -446,6 +446,22 @@ size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_
 #define CHANNEL_SETTINGS_FIELD_NAME 3
 #define CHANNEL_ROLE_PRIMARY        1
 
+/* config.proto: Config.device is 1 and DeviceConfig.tzdef is 11. Checked
+ * against the firmware's generated config.pb.h: meshtastic_Config_device_tag 1,
+ * meshtastic_Config_DeviceConfig_tzdef_tag 11. */
+#define CONFIG_FIELD_DEVICE      1
+#define DEVICECONFIG_FIELD_TZDEF 11
+
+/* A POSIX TZ string: zone name "UTC", zero offset, no daylight saving rule.
+ * The firmware stores exactly this kind of string in DeviceConfig.tzdef
+ * (config.pb.h: "POSIX Timezone definition string", char tzdef[65]).
+ *
+ * It is sent so the field is not empty. The iOS app's handleConfig
+ * (AccessoryManager+FromRadio.swift:359, v2.7.21) writes set_config with the
+ * phone's own timezone whenever device.tzdef is empty, on every read of the
+ * device variant. Once it is non-empty the phone stops sending that write. */
+#define PHONE_TZDEF "UTC0"
+
 /* config.proto: Config.lora is 6, and the LoRaConfig fields below. */
 #define CONFIG_FIELD_LORA       6
 #define LORA_FIELD_USE_PRESET   1
@@ -595,6 +611,25 @@ size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_l
     if(!pb_writer_ok(&msg)) return 0;
 
     return pb_writer_len(&msg);
+}
+
+size_t phone_encode_device_config(uint8_t* out, size_t out_len) {
+    uint8_t device[32];
+    PbWriter device_writer;
+
+    if(out == NULL) return 0;
+
+    pb_writer_init(&device_writer, device, sizeof(device));
+    pb_write_string_field(&device_writer, DEVICECONFIG_FIELD_TZDEF, PHONE_TZDEF);
+    if(!pb_writer_ok(&device_writer)) return 0;
+
+    return encode_variant(
+        FROMRADIO_FIELD_CONFIG,
+        CONFIG_FIELD_DEVICE,
+        device,
+        pb_writer_len(&device_writer),
+        out,
+        out_len);
 }
 
 size_t phone_encode_get_owner_response(

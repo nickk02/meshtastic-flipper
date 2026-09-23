@@ -129,6 +129,13 @@ size_t
  * LoRaConfig. */
 size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_len);
 
+/* FromRadio { config { device { tzdef } } }.
+ *
+ * Every other DeviceConfig field is left at its default. tzdef is set because
+ * the iOS app writes set_config with a timezone whenever it reads an empty one.
+ * config.proto, message Config.DeviceConfig. */
+size_t phone_encode_device_config(uint8_t* out, size_t out_len);
+
 /* Config and ModuleConfig variant counts the firmware emits during stage 1.
  * config.proto Config has 10 variants, module_config.proto ModuleConfig has 17
  * but PhoneAPI.cpp sends the first 13. */

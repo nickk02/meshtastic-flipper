@@ -4,8 +4,9 @@
  * is used. */
 #define STAGE_TWO_REPEATS 4
 
-/* config.proto, Config.lora. */
-#define CONFIG_VARIANT_LORA 6
+/* config.proto, Config.device and Config.lora. */
+#define CONFIG_VARIANT_DEVICE 1
+#define CONFIG_VARIANT_LORA   6
 
 #include <string.h>
 
@@ -128,12 +129,17 @@ bool handshake_handle_to_radio(
             if(!push(reply, written)) return false;
         }
 
-        /* Every Config variant, in field order. LoRa is field 6 and carries
-         * real settings; the rest are empty, meaning all defaults, which is the
-         * truthful answer for a device that does not implement them. Skipping
-         * them is what made the client abandon stage one and reconnect. */
+        /* Every Config variant, in field order. Device is field 1 and carries
+         * a tzdef, so the iOS app does not write one back. LoRa is field 6 and
+         * carries real settings; the rest are empty, meaning all defaults,
+         * which is the truthful answer for a device that does not implement
+         * them. Skipping them is what made the client abandon stage one and
+         * reconnect. */
         for(uint32_t variant = 1; variant <= PHONE_CONFIG_VARIANTS; variant++) {
-            if(variant == CONFIG_VARIANT_LORA) {
+            if(variant == CONFIG_VARIANT_DEVICE) {
+                written = phone_encode_device_config(
+                    reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            } else if(variant == CONFIG_VARIANT_LORA) {
                 written = phone_encode_lora_config(
                     h->config.lora.channel_num,
                     reply->messages[reply->count].data,
