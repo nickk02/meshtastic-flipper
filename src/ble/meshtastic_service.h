@@ -93,6 +93,10 @@ typedef struct {
      * rejects writes, and the two are indistinguishable without this. */
     uint16_t from_radio_handle;
     uint16_t from_num_handle;
+
+    /* Frames refused because the FromRadio queue was full. Anything above zero
+     * means the phone missed a message the device built. */
+    uint32_t refused;
 } MeshBleStats;
 
 void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out);
