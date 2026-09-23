@@ -231,14 +231,46 @@ TEST(test_paced_flow_reproduces_the_cycle) {
     printf("  set_config(tzdef) writes caused by duplicate reads: %d\n", c.sent_set_config_tzdef);
     ASSERT_TRUE(c.sent_set_config_tzdef > 1);
 
-    /* Stage two with STAGE_TWO_REPEATS copies of NodeInfo, each read about
-     * four times, is where the phone's "16 nodes" came from: it was this
-     * node, counted once per read. */
+    /* handleNodeInfo counts every NodeInfo it reads as another node. With
+     * STAGE_TWO_REPEATS at 4, four copies each read about four times made the
+     * phone show "16 nodes" for this one node. One copy is still read several
+     * times, because that is the transport, so the count stays above 1. */
     printf(
-        "  stage two node count as the phone displays it: %d (from %d NodeInfo frames queued)\n",
+        "  stage two node count as the phone displays it: %d (NodeInfo reads, both stages: %d)\n",
         c.node_count,
-        c.variant_count[IOS_FR_NODE_INFO] - 1);
+        c.variant_count[IOS_FR_NODE_INFO]);
     ASSERT_TRUE(c.node_count > 1);
+}
+
+/* Stage two queues one NodeInfo and one config_complete_id. On either
+ * transport it must still complete, and on the paced one the duplicate reads
+ * of that single copy must not add up to the 16 the repeats produced. */
+TEST(test_stage_two_single_copy_completes_on_both_transports) {
+    const IosTransport transports[] = {IosTransportIdeal, IosTransportPaced};
+    for(size_t t = 0; t < sizeof(transports) / sizeof(transports[0]); t++) {
+        IosClient c;
+        MeshConfig cfg = config();
+        ios_client_init(&c, &cfg, transports[t]);
+        ios_client_connect(&c);
+
+        ASSERT_TRUE(c.db_gate_open);
+        ASSERT_TRUE(c.db_first_node_seen);
+        /* The node was actually read, not just skipped past by the gate. */
+        ASSERT_TRUE(c.node_count >= 1);
+        ASSERT_TRUE(c.node_count <= 8);
+        ASSERT_TRUE(c.db_complete_count >= 1);
+        ASSERT_TRUE(c.db_complete_count <= 5);
+        if(transports[t] == IosTransportIdeal) {
+            /* One read per frame: exactly what was queued. */
+            ASSERT_EQ_INT(c.node_count, 1);
+            ASSERT_EQ_INT(c.db_complete_count, 1);
+        }
+        printf(
+            "  %s transport: stage two node count %d, 69421 seen %d\n",
+            transports[t] == IosTransportIdeal ? "ideal" : "paced",
+            c.node_count,
+            c.db_complete_count);
+    }
 }
 
 /* A link that drops mid batch leaves the published value in place. On the
@@ -362,6 +394,7 @@ RUN_TEST(test_requests_the_client_makes_during_stage_one);
 RUN_TEST(test_every_frame_fits_one_read);
 RUN_TEST(test_oversize_frame_disconnects_the_client);
 RUN_TEST(test_paced_flow_reproduces_the_cycle);
+RUN_TEST(test_stage_two_single_copy_completes_on_both_transports);
 RUN_TEST(test_stale_value_survives_a_reconnect_today);
 RUN_TEST(test_forwarded_packet_is_decoded_with_radio_metadata);
 TEST_MAIN_END()
