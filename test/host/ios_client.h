@@ -143,8 +143,13 @@ typedef enum {
     IosOutcomeFailed,
 } IosOutcome;
 
+/* Larger than PHONE_FRAME_MAX on purpose. The harness must be able to carry a
+ * frame the device should have refused, so a test can show what the phone does
+ * when one gets through. */
+#define IOS_FRAME_MAX 256
+
 typedef struct {
-    uint8_t data[HANDSHAKE_MAX_MESSAGE];
+    uint8_t data[IOS_FRAME_MAX];
     size_t len;
 } IosFrame;
 
@@ -496,7 +501,7 @@ static inline bool ios_version_supported(const char* fw) {
 /* Device model */
 
 static inline void ios_device_queue_frame(IosClient* c, const uint8_t* data, size_t len) {
-    if(len == 0 || len > HANDSHAKE_MAX_MESSAGE) return;
+    if(len == 0 || len > IOS_FRAME_MAX) return;
     if(c->q_pending >= c->queue_depth || c->q_pending >= IOS_QUEUE_CAP) {
         c->queue_refused++;
         ios_log(c, "device: queue full, frame of %u bytes refused", (unsigned)len);
@@ -581,22 +586,22 @@ static inline void ios_device_write(IosClient* c, const uint8_t* data, size_t le
 }
 
 /* BLEConnection.read(): one readValue, one response, at most IOS_READ_MAX
- * bytes of it. */
+ * bytes of it. out must hold IOS_READ_MAX. */
 static inline size_t ios_device_read(IosClient* c, uint8_t* out, bool* truncated) {
     size_t len = 0;
     *truncated = false;
     if(c->transport == IosTransportIdeal) {
         if(c->q_pending > 0) {
             IosFrame* f = &c->queue[c->q_tail];
-            memcpy(out, f->data, f->len);
             len = f->len;
+            memcpy(out, f->data, len > IOS_READ_MAX ? IOS_READ_MAX : len);
             c->q_tail = (c->q_tail + 1) % IOS_QUEUE_CAP;
             c->q_pending--;
         }
     } else {
         ios_device_advance(c, c->now_ms);
-        memcpy(out, c->published.data, c->published.len);
         len = c->published.len;
+        memcpy(out, c->published.data, len > IOS_READ_MAX ? IOS_READ_MAX : len);
         c->now_ms += c->read_rtt_ms;
     }
     if(len > IOS_READ_MAX) {
@@ -1035,8 +1040,8 @@ static inline void ios_process_frame(IosClient* c, const uint8_t* buf, size_t le
 /* One drainPendingPackets pass: read until an empty read. In paced mode the
  * same published frame is seen on consecutive reads; those are counted. */
 static inline void ios_drain(IosClient* c) {
-    uint8_t buf[HANDSHAKE_MAX_MESSAGE];
-    uint8_t last[HANDSHAKE_MAX_MESSAGE];
+    uint8_t buf[IOS_READ_MAX];
+    uint8_t last[IOS_READ_MAX];
     size_t last_len = 0;
     bool truncated;
     c->doorbell_pending = false;

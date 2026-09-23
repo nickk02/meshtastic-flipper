@@ -9,6 +9,7 @@
 #include "mesh_data.h"
 #include "pb_write.h"
 #include "phone_encode.h"
+#include "src/ble/meshtastic_handshake.h"
 
 /* Minimal reader, so the tests verify structure rather than trusting the
    writer to agree with itself. */
@@ -362,6 +363,118 @@ TEST(test_decode_round_trips_with_encoder) {
     ASSERT_EQ_INT(nonce, 0);
 }
 
+/* Frame size cap */
+
+/* The largest identity a PhoneIdentity can hold: every string at its array
+ * size less the terminator, and every integer at its widest varint. Filled
+ * directly rather than through phone_identity_init, so the bound tested is
+ * the struct's and not whatever the init path happens to produce. */
+static PhoneIdentity maximal_identity(void) {
+    PhoneIdentity id;
+    memset(&id, 0, sizeof(id));
+    id.node_num = 0xFFFFFFFF;
+    id.hw_model = 0xFFFFFFFF;
+    memset(id.id, 'I', sizeof(id.id) - 1);
+    memset(id.long_name, 'L', sizeof(id.long_name) - 1);
+    memset(id.short_name, 'S', sizeof(id.short_name) - 1);
+    return id;
+}
+
+static size_t frame_max_seen = 0;
+
+/* Built in a buffer larger than the cap, so a frame over it is measured
+ * rather than refused by out_len. */
+static void check_fits(const char* what, size_t len) {
+    ASSERT_TRUE(len > 0);
+    if(len > PHONE_FRAME_MAX) {
+        printf("  %s: %u bytes, over %d\n", what, (unsigned)len, PHONE_FRAME_MAX);
+    }
+    ASSERT_TRUE(len <= PHONE_FRAME_MAX);
+    if(len > frame_max_seen) frame_max_seen = len;
+}
+
+TEST(test_every_frame_fits_the_phone_read_limit) {
+    PhoneIdentity id = maximal_identity();
+    uint8_t out[256];
+    uint8_t passkey[PHONE_SESSION_PASSKEY_LEN];
+    /* The longest channel name the config record holds. */
+    char channel[MESH_CONFIG_CHANNEL_NAME_MAX];
+    size_t len;
+
+    memset(passkey, 0xFF, sizeof(passkey));
+    memset(channel, 'C', sizeof(channel) - 1);
+    channel[sizeof(channel) - 1] = '\0';
+    frame_max_seen = 0;
+
+    /* Stage one, in handshake order. */
+    len = phone_encode_my_node_info(&id, out, sizeof(out));
+    printf("  my_info %u", (unsigned)len);
+    check_fits("my_info", len);
+    check_fits("deviceuiConfig", phone_encode_device_ui(out, sizeof(out)));
+    len = phone_encode_node_info(&id, out, sizeof(out));
+    printf(", node_info %u", (unsigned)len);
+    check_fits("node_info", len);
+    len = phone_encode_device_metadata(&id, out, sizeof(out));
+    printf(", metadata %u", (unsigned)len);
+    check_fits("metadata", len);
+    len = phone_encode_primary_channel(channel, 0xFF, out, sizeof(out));
+    printf(", primary channel %u", (unsigned)len);
+    check_fits("primary channel", len);
+    for(uint32_t slot = 1; slot < PHONE_CHANNEL_SLOTS; slot++) {
+        check_fits("empty channel", phone_encode_empty_channel(slot, out, sizeof(out)));
+    }
+    check_fits("empty channel", phone_encode_empty_channel(0xFFFFFFFF, out, sizeof(out)));
+    len = phone_encode_lora_config(0xFFFFFFFF, out, sizeof(out));
+    printf(", lora %u\n", (unsigned)len);
+    check_fits("lora config", len);
+    for(uint32_t v = 1; v <= PHONE_CONFIG_VARIANTS; v++) {
+        check_fits("config variant", phone_encode_config_variant(v, NULL, 0, out, sizeof(out)));
+    }
+    for(uint32_t v = 1; v <= PHONE_MODULECONFIG_VARIANTS; v++) {
+        check_fits(
+            "module config variant", phone_encode_moduleconfig_variant(v, out, sizeof(out)));
+    }
+    check_fits("config_complete", phone_encode_config_complete(0xFFFFFFFF, out, sizeof(out)));
+
+    /* Admin replies, with addressing at its widest. */
+    const uint32_t fields[] = {
+        ADMIN_GET_OWNER_REQUEST,
+        ADMIN_GET_CANNED_REQUEST,
+        ADMIN_GET_RINGTONE_REQUEST,
+        ADMIN_SET_CONFIG};
+    for(size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        PhoneAdminRequest req = {
+            .packet_id = 0xFFFFFFFF,
+            .from = 0xFFFFFFFF,
+            .admin_field = fields[i],
+            .want_response = true};
+        len = phone_encode_admin_reply(&id, &req, passkey, out, sizeof(out));
+        printf("  admin reply to field %u: %u bytes\n", (unsigned)fields[i], (unsigned)len);
+        check_fits("admin reply", len);
+    }
+
+    printf(
+        "  largest frame with maximal fields: %u of %d\n",
+        (unsigned)frame_max_seen,
+        PHONE_FRAME_MAX);
+}
+
+/* The one encoder with no fixed bound is phone_encode_packet, which wraps
+ * whatever it is given. Past the cap it must refuse in a cap-sized buffer, not
+ * truncate, so an oversize frame never reaches the queue as a short one. */
+TEST(test_packet_over_the_read_limit_is_refused_not_truncated) {
+    uint8_t payload[190];
+    uint8_t out[PHONE_FRAME_MAX];
+    uint8_t wide[256];
+
+    memset(payload, 'x', sizeof(payload));
+    /* Tag, two byte length, 181 bytes: exactly the cap. */
+    ASSERT_EQ_INT(phone_encode_packet(payload, 181, out, sizeof(out)), PHONE_FRAME_MAX);
+    ASSERT_EQ_INT(phone_encode_packet(payload, 182, out, sizeof(out)), 0);
+    /* Given the room, it builds the frame, and it is over the cap. */
+    ASSERT_EQ_INT(phone_encode_packet(payload, sizeof(payload), wide, sizeof(wide)), 193);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_writer_omits_zero_varint);
 RUN_TEST(test_writer_always_variant_writes_zero);
@@ -384,4 +497,6 @@ RUN_TEST(test_decode_skips_other_fields);
 RUN_TEST(test_decode_reports_absent_want_config_id);
 RUN_TEST(test_decode_rejects_malformed);
 RUN_TEST(test_decode_round_trips_with_encoder);
+RUN_TEST(test_every_frame_fits_the_phone_read_limit);
+RUN_TEST(test_packet_over_the_read_limit_is_refused_not_truncated);
 TEST_MAIN_END()
