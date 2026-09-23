@@ -35,7 +35,16 @@ typedef enum {
 /* my_info, deviceuiConfig, own node_info, metadata, eight channel slots,
  * ten config variants, thirteen module config variants, config_complete. */
 #define HANDSHAKE_MAX_REPLIES 36
-#define HANDSHAKE_MAX_MESSAGE 192
+
+/* The largest FromRadio frame the phone can read. The iPhone negotiates ATT
+ * MTU 185 with this device, and one read returns at most the MTU minus the one
+ * byte ATT opcode. BLEConnection.read() reads once, with no long read, and
+ * drainPendingPackets disconnects on a frame that does not decode, which is
+ * what a truncated frame is (Meshtastic-Apple v2.7.21, BLEConnection.swift:196
+ * and :640). Nothing may queue a frame longer than this. */
+#define PHONE_FRAME_MAX 184
+
+#define HANDSHAKE_MAX_MESSAGE PHONE_FRAME_MAX
 
 typedef struct {
     uint8_t data[HANDSHAKE_MAX_MESSAGE];

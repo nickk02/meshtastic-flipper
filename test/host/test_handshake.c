@@ -457,6 +457,110 @@ TEST(test_no_reply_when_none_wanted) {
     ASSERT_EQ_INT(phone_encode_admin_reply(&pid, &req, passkey, out, sizeof(out)), 0);
 }
 
+/* ToRadio { packet { decoded { portnum: ADMIN_APP, payload: AdminMessage {
+ * <field>: true }, want_response }, from, id } }, for any admin request. */
+static size_t
+    make_admin_request(uint32_t field, uint32_t packet_id, uint32_t from, uint8_t* buf, size_t cap) {
+    uint8_t admin[16];
+    uint8_t data[64];
+    uint8_t packet[96];
+    PbWriter w;
+
+    pb_writer_init(&w, admin, sizeof(admin));
+    pb_write_varint_field_always(&w, field, 1);
+    size_t admin_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, 1, 6); /* portnum ADMIN_APP */
+    pb_write_bytes_field(&w, 2, admin, admin_len);
+    pb_write_varint_field_always(&w, 3, 1); /* want_response */
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, 1, from);
+    pb_write_submessage(&w, 4, data, data_len);
+    pb_write_fixed32_field_always(&w, 6, packet_id);
+    size_t packet_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, 1, packet, packet_len);
+    return pb_writer_len(&w);
+}
+
+/* The phone reads each FromRadio once, at most PHONE_FRAME_MAX bytes, and
+ * disconnects on a frame that does not decode. Every reply the handshake can
+ * produce, with the longest names the config record holds, must fit. */
+TEST(test_every_reply_fits_one_phone_read) {
+    Handshake h;
+    MeshConfig cfg;
+    HandshakeReply reply;
+    uint8_t to_radio[128];
+    size_t largest = 0;
+    const uint8_t passkey[PHONE_SESSION_PASSKEY_LEN] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    const uint32_t admin_fields[] = {
+        ADMIN_GET_OWNER_REQUEST,
+        ADMIN_GET_CANNED_REQUEST,
+        ADMIN_GET_RINGTONE_REQUEST,
+        ADMIN_SET_CONFIG};
+
+    ASSERT_EQ_INT(HANDSHAKE_MAX_MESSAGE, PHONE_FRAME_MAX);
+
+    mesh_config_defaults(&cfg, 0xFFFFFFFF);
+    ASSERT_TRUE(mesh_config_set_long_name(&cfg, "0123456789012345678901234567890123456789"));
+    ASSERT_TRUE(mesh_config_set_short_name(&cfg, "WXYZV"));
+    handshake_init(&h, &cfg);
+    handshake_set_session_passkey(&h, passkey);
+
+    size_t len = make_want_config(PHONE_NONCE_CONFIG, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_TRUE(reply.count > 0);
+    for(size_t i = 0; i < reply.count; i++) {
+        ASSERT_TRUE(reply.messages[i].len <= PHONE_FRAME_MAX);
+        if(reply.messages[i].len > largest) largest = reply.messages[i].len;
+    }
+
+    len = make_want_config(PHONE_NONCE_NODE_INFO, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_TRUE(reply.count > 0);
+    for(size_t i = 0; i < reply.count; i++) {
+        ASSERT_TRUE(reply.messages[i].len <= PHONE_FRAME_MAX);
+        if(reply.messages[i].len > largest) largest = reply.messages[i].len;
+    }
+
+    for(size_t f = 0; f < sizeof(admin_fields) / sizeof(admin_fields[0]); f++) {
+        len = make_admin_request(
+            admin_fields[f], 0xFFFFFFFF, 0xFFFFFFFF, to_radio, sizeof(to_radio));
+        ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+        ASSERT_EQ_INT(reply.count, 1);
+        ASSERT_TRUE(reply.messages[0].len <= PHONE_FRAME_MAX);
+        if(reply.messages[0].len > largest) largest = reply.messages[0].len;
+    }
+
+    printf(
+        "  largest handshake reply with maximal names: %u of %d\n",
+        (unsigned)largest,
+        PHONE_FRAME_MAX);
+}
+
+/* Every handshake encoder writes into a HandshakeMessage with out_len
+ * HANDSHAKE_MAX_MESSAGE, and push() refuses a zero length. So a frame past
+ * the cap is refused at the source, not truncated into one the phone would
+ * read as garbage. */
+TEST(test_frame_past_the_read_limit_is_refused) {
+    HandshakeMessage msg;
+    uint8_t payload[186];
+    uint8_t wide[256];
+
+    memset(payload, 'x', sizeof(payload));
+    /* 189 bytes with room to build it: over the cap. */
+    ASSERT_EQ_INT(phone_encode_packet(payload, sizeof(payload), wide, sizeof(wide)), 189);
+    /* In a handshake message slot it is refused outright. */
+    ASSERT_EQ_INT(
+        phone_encode_packet(payload, sizeof(payload), msg.data, HANDSHAKE_MAX_MESSAGE), 0);
+    ASSERT_EQ_INT(sizeof(msg.data), PHONE_FRAME_MAX);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_starts_idle);
 RUN_TEST(test_stage_one_follows_the_firmware_order);
@@ -476,5 +580,7 @@ RUN_TEST(test_real_ringtone_request_is_recognised);
 RUN_TEST(test_real_canned_message_request_is_recognised);
 RUN_TEST(test_every_observed_request_is_answered);
 RUN_TEST(test_no_reply_when_none_wanted);
+RUN_TEST(test_every_reply_fits_one_phone_read);
+RUN_TEST(test_frame_past_the_read_limit_is_refused);
 RUN_TEST(test_tolerates_null);
 TEST_MAIN_END()

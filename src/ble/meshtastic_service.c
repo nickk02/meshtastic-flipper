@@ -44,9 +44,10 @@
  * that out of a fixed ATT value array shared with every other service on the
  * device. Asking for more than we use is not free.
  *
- * 192 is HANDSHAKE_MAX_MESSAGE. Nothing we send can exceed it, and the queue
- * rejects anything larger so we never hold a message we cannot publish. */
-#define QUEUE_MESSAGE_MAX 192
+ * PHONE_FRAME_MAX is the most one phone read returns, see
+ * meshtastic_handshake.h. The queue rejects anything larger so we never hold a
+ * message the phone would read truncated and disconnect over. */
+#define QUEUE_MESSAGE_MAX PHONE_FRAME_MAX
 
 /* Declared value length for ToRadio. The phone's handshake writes are a few
  * bytes; this is headroom, not a target. */
@@ -382,7 +383,15 @@ static void drain_step(MeshtasticBleService* service) {
 
 bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* data, size_t len) {
     if(service == NULL || data == NULL) return false;
-    if(len == 0 || len > QUEUE_MESSAGE_MAX) return false;
+    if(len == 0) return false;
+    if(len > QUEUE_MESSAGE_MAX) {
+        FURI_LOG_E(
+            TAG,
+            "frame of %u bytes exceeds the %u byte read limit, dropped",
+            (unsigned)len,
+            (unsigned)QUEUE_MESSAGE_MAX);
+        return false;
+    }
 
     furi_mutex_acquire(service->mutex, FuriWaitForever);
 

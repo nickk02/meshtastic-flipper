@@ -177,17 +177,22 @@ TEST(test_every_frame_fits_one_read) {
 TEST(test_oversize_frame_disconnects_the_client) {
     IosClient c;
     MeshConfig cfg = config();
-    uint8_t big[HANDSHAKE_MAX_MESSAGE];
+    /* Local and past PHONE_FRAME_MAX: this frame is one the device refuses to
+     * queue, so it cannot be built in a buffer the device's cap sizes. */
+    uint8_t big[256];
     ios_client_init(&c, &cfg, IosTransportIdeal);
     ios_client_connect(&c);
     /* Whatever Step 6 said, the link is up for this test. */
     c.outcome = IosOutcomeNotRun;
     c.stage = 3;
-    /* A syntactically valid FromRadio.packet of 190 bytes. */
+    /* A syntactically valid FromRadio.packet of 189 bytes: tag, two byte
+     * length, 186 byte payload. */
     {
-        uint8_t payload[HANDSHAKE_MAX_MESSAGE];
+        uint8_t payload[186];
         memset(payload, 'x', sizeof(payload));
-        size_t n = phone_encode_packet(payload, 186, big, sizeof(big));
+        size_t n = phone_encode_packet(payload, sizeof(payload), big, sizeof(big));
+        ASSERT_EQ_INT(n, 189);
+        ASSERT_TRUE(n > PHONE_FRAME_MAX);
         ASSERT_TRUE(n > IOS_READ_MAX);
         ios_device_inject(&c, big, n);
     }
