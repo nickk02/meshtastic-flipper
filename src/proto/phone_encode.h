@@ -39,6 +39,7 @@
 #define FROMRADIO_FIELD_CONFIG_COMPLETE_ID 7
 #define FROMRADIO_FIELD_MODULECONFIG       9
 #define FROMRADIO_FIELD_CHANNEL            10
+#define FROMRADIO_FIELD_QUEUE_STATUS       11
 #define FROMRADIO_FIELD_CONFIG             5
 #define FROMRADIO_FIELD_METADATA           13
 #define FROMRADIO_FIELD_DEVICEUI           17
@@ -175,11 +176,36 @@ size_t phone_encode_packet(
     uint8_t* out,
     size_t out_len);
 
+/* FromRadio { queueStatus { res, free, maxlen, mesh_packet_id } }.
+ *
+ * What a real node sends after a heartbeat (PhoneAPI.cpp getFromRadio, the
+ * heartbeatReceived branch) and after it accepts a packet from the phone
+ * (MeshService.cpp sendToMesh). Field numbers from mesh.pb.h, QueueStatus:
+ * res 1 int32, free 2, maxlen 3, mesh_packet_id 4.
+ *
+ * free and maxlen are always written, so an all-zero answer is still visibly
+ * a QueueStatus rather than an empty submessage. res is int32, so a negative
+ * value goes out as a ten byte varint, the way protobuf encodes it. */
+size_t phone_encode_queue_status(
+    int32_t res,
+    uint32_t free_slots,
+    uint32_t maxlen,
+    uint32_t mesh_packet_id,
+    uint8_t* out,
+    size_t out_len);
+
 /* Read want_config_id out of a ToRadio the app wrote.
  *
  * Returns false when the message is malformed or carries no want_config_id.
  * Other ToRadio fields are skipped by wire type. */
 bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce);
+
+/* Read a ToRadio whose oneof is heartbeat, field 7.
+ *
+ * Returns false when the message is malformed or its first field is not a
+ * heartbeat. Heartbeat.nonce is field 1, a varint; a heartbeat without it
+ * carries nonce 0, the proto3 default. */
+bool phone_decode_heartbeat(const uint8_t* buf, size_t len, uint32_t* nonce);
 
 /* Length of the session passkey. admin.proto documents 8 bytes. */
 #define PHONE_SESSION_PASSKEY_LEN 8

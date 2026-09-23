@@ -470,7 +470,13 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
              * items a prior connection never got to (because it disconnected
              * mid drain) stay in the queue and consume capacity meant for the
              * new session, which is exactly what turned into "queue full,
-             * reply 31 of 36 dropped" on real hardware. */
+             * reply 31 of 36 dropped" on real hardware.
+             *
+             * The reply to the Step 2 heartbeat goes with it. The firmware
+             * would keep it (heartbeatReceived survives want_config,
+             * PhoneAPI.cpp:411 and :581), but the iOS client never waits for
+             * a queueStatus on BLE, and this reset is hardware-verified, so
+             * it stays a plain clear. */
             furi_mutex_acquire(service->mutex, FuriWaitForever);
             service->head = 0;
             service->tail = 0;
@@ -479,12 +485,17 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
             service->doorbell_rung = false;
             furi_mutex_release(service->mutex);
         }
-    } else if(len > 0 && (data[0] >> 3) == TORADIO_FIELD_HEARTBEAT) {
-        /* The settle heartbeat between stages. The firmware does not echo it,
-         * so sending nothing back is correct, and this line is here so a silent
-         * device can be told apart from a deaf one. */
+    } else if(phone_decode_heartbeat(data, len, &nonce)) {
+        /* The settle heartbeat between stages. The firmware answers it with
+         * one queueStatus (PhoneAPI.cpp, heartbeatReceived), which the
+         * handshake below builds, except for nonce 1, its NodeInfo broadcast
+         * trigger, which gets no reply. */
         understood = true;
-        FURI_LOG_I(TAG, "ToRadio heartbeat, no reply expected");
+        if(nonce == 1) {
+            FURI_LOG_I(TAG, "ToRadio heartbeat nonce=1, no reply");
+        } else {
+            FURI_LOG_I(TAG, "ToRadio heartbeat, queueing queueStatus");
+        }
     } else {
         /* Decoded independently of the handshake's own admin handling, purely
          * to log which field a real connection actually asked for. The device

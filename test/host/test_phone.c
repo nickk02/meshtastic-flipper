@@ -362,6 +362,133 @@ TEST(test_decode_round_trips_with_encoder) {
     ASSERT_EQ_INT(nonce, 0);
 }
 
+/* queueStatus, FromRadio field 11 */
+
+TEST(test_queue_status_is_field_11_with_all_subfields) {
+    uint8_t buf[32];
+    const uint8_t* qs = NULL;
+    size_t qs_len = 0;
+    uint64_t value = 0;
+
+    size_t len = phone_encode_queue_status(0, 16, 16, 0x01020304u, buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    /* Tag byte: field 11, wire type 2. */
+    ASSERT_EQ_INT(buf[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_QUEUE_STATUS, NULL, &qs, &qs_len));
+
+    /* res 0 is the proto3 default and is left out. */
+    ASSERT_TRUE(!find_field(qs, qs_len, 1, &value, NULL, NULL));
+    ASSERT_TRUE(find_field(qs, qs_len, 2, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 16);
+    ASSERT_TRUE(find_field(qs, qs_len, 3, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 16);
+    ASSERT_TRUE(find_field(qs, qs_len, 4, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 0x01020304u);
+}
+
+TEST(test_queue_status_zeros_still_carry_free_and_maxlen) {
+    /* An all-zero answer must still be a QueueStatus with fields in it, not
+       an empty submessage. */
+    uint8_t buf[16];
+    const uint8_t* qs = NULL;
+    size_t qs_len = 0;
+    uint64_t value = 99;
+
+    size_t len = phone_encode_queue_status(0, 0, 0, 0, buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_QUEUE_STATUS, NULL, &qs, &qs_len));
+    ASSERT_EQ_INT(qs_len, 4);
+    ASSERT_TRUE(find_field(qs, qs_len, 2, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 0);
+    value = 99;
+    ASSERT_TRUE(find_field(qs, qs_len, 3, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 0);
+    ASSERT_TRUE(!find_field(qs, qs_len, 1, &value, NULL, NULL));
+    ASSERT_TRUE(!find_field(qs, qs_len, 4, &value, NULL, NULL));
+}
+
+TEST(test_queue_status_negative_res_is_ten_byte_varint) {
+    /* int32 -1 is sign extended to 64 bits on the wire: tag, then ten bytes,
+       nine of 0xff and a final 0x01. Five bytes would decode as 4294967295. */
+    uint8_t buf[32];
+    const uint8_t* qs = NULL;
+    size_t qs_len = 0;
+    uint64_t value = 0;
+    const uint8_t expected_res[] = {
+        0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01};
+
+    size_t len = phone_encode_queue_status(-1, 16, 16, 0, buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_QUEUE_STATUS, NULL, &qs, &qs_len));
+    ASSERT_EQ_INT(qs_len, sizeof(expected_res) + 4);
+    ASSERT_EQ_MEM(qs, expected_res, sizeof(expected_res));
+
+    ASSERT_TRUE(find_field(qs, qs_len, 1, &value, NULL, NULL));
+    ASSERT_EQ_INT((int32_t)(int64_t)value, -1);
+    ASSERT_TRUE(find_field(qs, qs_len, 2, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 16);
+}
+
+TEST(test_queue_status_rejects_small_buffer) {
+    uint8_t buf[8];
+    ASSERT_EQ_INT(phone_encode_queue_status(-1, 16, 16, 0, buf, sizeof(buf)), 0);
+    ASSERT_EQ_INT(phone_encode_queue_status(0, 16, 16, 0, NULL, 32), 0);
+}
+
+/* ToRadio heartbeat decode */
+
+static size_t build_heartbeat(uint8_t* buf, size_t cap, bool with_nonce, uint32_t nonce) {
+    uint8_t hb[8];
+    PbWriter w;
+    size_t hb_len = 0;
+    if(with_nonce) {
+        pb_writer_init(&w, hb, sizeof(hb));
+        pb_write_varint_field_always(&w, 1, nonce);
+        hb_len = pb_writer_len(&w);
+    }
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_HEARTBEAT, hb, hb_len);
+    return pb_writer_len(&w);
+}
+
+TEST(test_decode_heartbeat_nonce) {
+    uint8_t buf[16];
+    uint32_t nonce = 0;
+    size_t len = build_heartbeat(buf, sizeof(buf), true, 0x89abcdefu);
+    ASSERT_TRUE(phone_decode_heartbeat(buf, len, &nonce));
+    ASSERT_EQ_INT(nonce, 0x89abcdefu);
+
+    len = build_heartbeat(buf, sizeof(buf), true, 1);
+    ASSERT_TRUE(phone_decode_heartbeat(buf, len, &nonce));
+    ASSERT_EQ_INT(nonce, 1);
+}
+
+TEST(test_decode_heartbeat_without_nonce_is_zero) {
+    uint8_t buf[16];
+    uint32_t nonce = 77;
+    size_t len = build_heartbeat(buf, sizeof(buf), false, 0);
+    ASSERT_EQ_INT(len, 2);
+    ASSERT_TRUE(phone_decode_heartbeat(buf, len, &nonce));
+    ASSERT_EQ_INT(nonce, 0);
+}
+
+TEST(test_decode_heartbeat_rejects_others_and_malformed) {
+    uint8_t buf[16];
+    uint32_t nonce = 0;
+    PbWriter w;
+    const uint8_t bad_inner[] = {0x3a, 0x02, 0x08, 0x80}; /* nonce varint runs off */
+    const uint8_t bad_outer[] = {0x3a, 0x05, 0x08, 0x01}; /* length past the end */
+    const uint8_t varint_hb[] = {0x38, 0x01}; /* field 7 as a varint */
+
+    pb_writer_init(&w, buf, sizeof(buf));
+    pb_write_varint_field_always(&w, TORADIO_FIELD_WANT_CONFIG_ID, PHONE_NONCE_CONFIG);
+    ASSERT_TRUE(!phone_decode_heartbeat(buf, pb_writer_len(&w), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(bad_inner, sizeof(bad_inner), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(bad_outer, sizeof(bad_outer), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(varint_hb, sizeof(varint_hb), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(NULL, 0, &nonce));
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_writer_omits_zero_varint);
 RUN_TEST(test_writer_always_variant_writes_zero);
@@ -384,4 +511,11 @@ RUN_TEST(test_decode_skips_other_fields);
 RUN_TEST(test_decode_reports_absent_want_config_id);
 RUN_TEST(test_decode_rejects_malformed);
 RUN_TEST(test_decode_round_trips_with_encoder);
+RUN_TEST(test_queue_status_is_field_11_with_all_subfields);
+RUN_TEST(test_queue_status_zeros_still_carry_free_and_maxlen);
+RUN_TEST(test_queue_status_negative_res_is_ten_byte_varint);
+RUN_TEST(test_queue_status_rejects_small_buffer);
+RUN_TEST(test_decode_heartbeat_nonce);
+RUN_TEST(test_decode_heartbeat_without_nonce_is_zero);
+RUN_TEST(test_decode_heartbeat_rejects_others_and_malformed);
 TEST_MAIN_END()
