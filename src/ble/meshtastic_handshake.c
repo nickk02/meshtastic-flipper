@@ -55,6 +55,7 @@ bool handshake_handle_to_radio(
     size_t len,
     HandshakeReply* reply) {
     uint32_t nonce = 0;
+    uint32_t packet_id = 0;
     size_t written;
 
     if(h == NULL || reply == NULL) return false;
@@ -81,6 +82,24 @@ bool handshake_handle_to_radio(
          * caller uses the return to decide whether the message was understood,
          * and an unanswered admin message reads as a stalled device. */
         if(written == 0) return true;
+        return push(reply, written);
+    }
+
+    /* Any other packet from the phone, such as a text message, is accepted
+     * and acknowledged with a queueStatus carrying its id. That is how the
+     * firmware tells the phone a packet was taken: handleToRadioPacket hands
+     * it to MeshService::handleToRadio (PhoneAPI.cpp:1913), whose sendToMesh
+     * queues router->getQueueStatus() with mesh_packet_id = p->id
+     * (MeshService.cpp:394-399). This device has no mesh transmit path for it
+     * yet, so the answer reports only that the packet was taken. */
+    if(phone_decode_packet_id(data, len, &packet_id)) {
+        written = phone_encode_queue_status(
+            0,
+            HANDSHAKE_QUEUE_FREE_REPORT,
+            HANDSHAKE_QUEUE_MAXLEN_REPORT,
+            packet_id,
+            reply->messages[reply->count].data,
+            HANDSHAKE_MAX_MESSAGE);
         return push(reply, written);
     }
 

@@ -454,8 +454,17 @@ bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce
 
 /* True when every field in a message has a legal tag and fits. scan_field
  * reports "absent" and "malformed" the same way, and a heartbeat needs them
- * apart: an absent nonce is 0, a malformed one is not a heartbeat at all. */
-static bool message_well_formed(const uint8_t* buf, size_t len) {
+ * apart: an absent nonce is 0, a malformed one is not a heartbeat at all.
+ *
+ * When want_fixed32 is non-zero, a field of that number with wire type 5 is
+ * reported through fixed32 and found. scan_field reads a varint and a fixed32
+ * into the same value, and MeshPacket.id is only valid as the latter. */
+static bool message_well_formed(
+    const uint8_t* buf,
+    size_t len,
+    uint32_t want_fixed32,
+    uint32_t* fixed32,
+    bool* found) {
     size_t pos = 0;
 
     while(pos < len) {
@@ -463,6 +472,13 @@ static bool message_well_formed(const uint8_t* buf, size_t len) {
         uint64_t value;
         if(!read_varint(buf, len, &pos, &tag)) return false;
         if((tag >> 3) == 0) return false;
+
+        if(want_fixed32 != 0 && (tag >> 3) == want_fixed32 && (tag & 0x07) == 5 &&
+           len - pos >= 4) {
+            *fixed32 = (uint32_t)buf[pos] | ((uint32_t)buf[pos + 1] << 8) |
+                       ((uint32_t)buf[pos + 2] << 16) | ((uint32_t)buf[pos + 3] << 24);
+            *found = true;
+        }
 
         switch(tag & 0x07) {
         case 0:
@@ -502,12 +518,32 @@ bool phone_decode_heartbeat(const uint8_t* buf, size_t len, uint32_t* nonce) {
     if(tag != (((uint64_t)TORADIO_FIELD_HEARTBEAT << 3) | 2)) return false;
 
     if(!scan_field(buf, len, TORADIO_FIELD_HEARTBEAT, &hb, &hb_len, NULL)) return false;
-    if(!message_well_formed(hb, hb_len)) return false;
+    if(!message_well_formed(hb, hb_len, 0, NULL, NULL)) return false;
 
     *nonce = 0;
     if(scan_field(hb, hb_len, HEARTBEAT_FIELD_NONCE, NULL, NULL, &value)) {
         *nonce = (uint32_t)value;
     }
+    return true;
+}
+
+bool phone_decode_packet_id(const uint8_t* to_radio, size_t len, uint32_t* id) {
+    const uint8_t* packet = NULL;
+    size_t packet_len = 0;
+    uint32_t value = 0;
+    bool found = false;
+
+    if(to_radio == NULL || id == NULL) return false;
+
+    if(!scan_field(to_radio, len, TORADIO_FIELD_PACKET, &packet, &packet_len, NULL)) {
+        return false;
+    }
+    if(!message_well_formed(packet, packet_len, MESHPACKET_FIELD_ID, &value, &found)) {
+        return false;
+    }
+    if(!found) return false;
+
+    *id = value;
     return true;
 }
 

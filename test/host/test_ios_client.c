@@ -354,6 +354,39 @@ TEST(test_forwarded_packet_is_decoded_with_radio_metadata) {
     ASSERT_TRUE(c.last_packet.has_hop_start && c.last_packet.hop_start == 5);
 }
 
+/* A text message the phone sends after connect is taken and acknowledged
+ * with a queueStatus carrying its id, as MeshService.cpp sendToMesh does. */
+TEST(test_sent_text_message_is_acknowledged) {
+    IosClient c;
+    MeshConfig cfg = config();
+    uint8_t data[32];
+    uint8_t packet[96];
+    uint8_t to_radio[128];
+    PbWriter w;
+    ios_client_init(&c, &cfg, IosTransportIdeal);
+    ios_client_connect(&c);
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, IOS_DATA_PORTNUM, 1);
+    pb_write_string_field(&w, IOS_DATA_PAYLOAD, "hi");
+    size_t data_len = pb_writer_len(&w);
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, IOS_MP_TO, 0xFFFFFFFF);
+    pb_write_submessage(&w, IOS_MP_DECODED, data, data_len);
+    pb_write_fixed32_field_always(&w, IOS_MP_ID, 0x01020304);
+    size_t packet_len = pb_writer_len(&w);
+    pb_writer_init(&w, to_radio, sizeof(to_radio));
+    pb_write_submessage(&w, IOS_TR_PACKET, packet, packet_len);
+    ASSERT_TRUE(pb_writer_ok(&w));
+
+    int before = c.queue_status_frames;
+    int not_understood = c.to_radio_not_understood;
+    ios_device_write(&c, to_radio, pb_writer_len(&w));
+    ios_drain(&c);
+    ASSERT_EQ_INT(c.queue_status_frames, before + 1);
+    ASSERT_EQ_INT(c.to_radio_not_understood, not_understood);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_numeric_compare_matches_foundation);
 RUN_TEST(test_version_2_5_0_fails_step_6);
@@ -366,4 +399,5 @@ RUN_TEST(test_oversize_frame_disconnects_the_client);
 RUN_TEST(test_paced_flow_reproduces_the_cycle);
 RUN_TEST(test_stale_value_survives_a_reconnect_today);
 RUN_TEST(test_forwarded_packet_is_decoded_with_radio_metadata);
+RUN_TEST(test_sent_text_message_is_acknowledged);
 TEST_MAIN_END()

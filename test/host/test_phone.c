@@ -489,6 +489,72 @@ TEST(test_decode_heartbeat_rejects_others_and_malformed) {
     ASSERT_TRUE(!phone_decode_heartbeat(NULL, 0, &nonce));
 }
 
+/* ToRadio.packet id decode */
+
+static size_t build_text_packet(uint8_t* buf, size_t cap, bool fixed32_id, uint32_t id) {
+    uint8_t data[32];
+    uint8_t packet[64];
+    PbWriter w;
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, 1, 1); /* portnum TEXT_MESSAGE_APP */
+    pb_write_string_field(&w, 2, "hi");
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, 2, 0xFFFFFFFFu); /* to broadcast */
+    pb_write_submessage(&w, 4, data, data_len);
+    if(fixed32_id) {
+        pb_write_fixed32_field_always(&w, 6, id);
+    } else {
+        pb_write_varint_field_always(&w, 6, id);
+    }
+    size_t packet_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_PACKET, packet, packet_len);
+    return pb_writer_ok(&w) ? pb_writer_len(&w) : 0;
+}
+
+TEST(test_decode_packet_id_reads_fixed32) {
+    uint8_t buf[96];
+    uint32_t id = 0;
+    size_t len = build_text_packet(buf, sizeof(buf), true, 0x01020304u);
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(phone_decode_packet_id(buf, len, &id));
+    ASSERT_EQ_INT(id, 0x01020304u);
+}
+
+TEST(test_decode_packet_id_rejects_varint_id) {
+    /* MeshPacket.id is fixed32. A varint in field 6 is not an id. */
+    uint8_t buf[96];
+    uint32_t id = 0;
+    size_t len = build_text_packet(buf, sizeof(buf), false, 0x01020304u);
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(!phone_decode_packet_id(buf, len, &id));
+}
+
+TEST(test_decode_packet_id_rejects_malformed_and_absent) {
+    uint8_t buf[96];
+    uint32_t id = 0;
+    PbWriter w;
+    /* ToRadio.packet { id: fixed32 cut short } */
+    const uint8_t cut_id[] = {0x0a, 0x03, 0x35, 0x04, 0x03};
+    /* ToRadio.packet whose length runs past the end. */
+    const uint8_t bad_len[] = {0x0a, 0x09, 0x35, 0x04, 0x03, 0x02, 0x01};
+    /* ToRadio.packet { from } with no id. */
+    const uint8_t no_id[] = {0x0a, 0x05, 0x0d, 0x01, 0x02, 0x03, 0x04};
+
+    ASSERT_TRUE(!phone_decode_packet_id(cut_id, sizeof(cut_id), &id));
+    ASSERT_TRUE(!phone_decode_packet_id(bad_len, sizeof(bad_len), &id));
+    ASSERT_TRUE(!phone_decode_packet_id(no_id, sizeof(no_id), &id));
+
+    pb_writer_init(&w, buf, sizeof(buf));
+    pb_write_varint_field_always(&w, TORADIO_FIELD_WANT_CONFIG_ID, PHONE_NONCE_CONFIG);
+    ASSERT_TRUE(!phone_decode_packet_id(buf, pb_writer_len(&w), &id));
+    ASSERT_TRUE(!phone_decode_packet_id(NULL, 4, &id));
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_writer_omits_zero_varint);
 RUN_TEST(test_writer_always_variant_writes_zero);
@@ -518,4 +584,7 @@ RUN_TEST(test_queue_status_rejects_small_buffer);
 RUN_TEST(test_decode_heartbeat_nonce);
 RUN_TEST(test_decode_heartbeat_without_nonce_is_zero);
 RUN_TEST(test_decode_heartbeat_rejects_others_and_malformed);
+RUN_TEST(test_decode_packet_id_reads_fixed32);
+RUN_TEST(test_decode_packet_id_rejects_varint_id);
+RUN_TEST(test_decode_packet_id_rejects_malformed_and_absent);
 TEST_MAIN_END()

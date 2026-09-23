@@ -207,6 +207,13 @@ bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce
  * carries nonce 0, the proto3 default. */
 bool phone_decode_heartbeat(const uint8_t* buf, size_t len, uint32_t* nonce);
 
+/* Read MeshPacket.id out of a ToRadio.packet.
+ *
+ * Walks ToRadio.packet (field 1) and reads MeshPacket.id, field 6, which is
+ * fixed32 (wire type 5). Returns false when there is no packet, the packet is
+ * malformed, or it carries no id of that wire type. */
+bool phone_decode_packet_id(const uint8_t* to_radio, size_t len, uint32_t* id);
+
 /* Length of the session passkey. admin.proto documents 8 bytes. */
 #define PHONE_SESSION_PASSKEY_LEN 8
 
