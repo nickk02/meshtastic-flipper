@@ -302,6 +302,39 @@ TEST(test_packet_is_wrapped_in_field_2) {
     ASSERT_EQ_MEM(sub, payload, sizeof(payload));
 }
 
+/* Config.device */
+
+TEST(test_device_config_carries_tzdef) {
+    /* An empty tzdef is what makes the iOS app write set_config with the
+     * phone's timezone on every read of this variant. */
+    uint8_t buf[64];
+    const uint8_t* config = NULL;
+    size_t config_len = 0;
+    const uint8_t* device = NULL;
+    size_t device_len = 0;
+    const uint8_t* tz = NULL;
+    size_t tz_len = 0;
+
+    size_t len = phone_encode_device_config(buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    /* FromRadio.config is field 5. */
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_CONFIG, NULL, &config, &config_len));
+    /* Config.device is field 1. */
+    ASSERT_TRUE(find_field(config, config_len, 1, NULL, &device, &device_len));
+    /* DeviceConfig.tzdef is field 11, a POSIX TZ string. */
+    ASSERT_TRUE(find_field(device, device_len, 11, NULL, &tz, &tz_len));
+    ASSERT_EQ_INT(tz_len, 4);
+    ASSERT_EQ_MEM(tz, "UTC0", 4);
+    /* Nothing else in DeviceConfig: tag, length, four bytes. */
+    ASSERT_EQ_INT(device_len, 6);
+}
+
+TEST(test_device_config_rejects_small_buffer) {
+    uint8_t buf[4];
+    ASSERT_EQ_INT(phone_encode_device_config(buf, sizeof(buf)), 0);
+    ASSERT_EQ_INT(phone_encode_device_config(NULL, 64), 0);
+}
+
 /* ToRadio decode */
 
 TEST(test_decode_want_config_id) {
@@ -379,6 +412,8 @@ RUN_TEST(test_config_complete_uses_field_7);
 RUN_TEST(test_both_handshake_nonces_encode);
 RUN_TEST(test_config_complete_with_zero_nonce_still_writes);
 RUN_TEST(test_packet_is_wrapped_in_field_2);
+RUN_TEST(test_device_config_carries_tzdef);
+RUN_TEST(test_device_config_rejects_small_buffer);
 RUN_TEST(test_decode_want_config_id);
 RUN_TEST(test_decode_skips_other_fields);
 RUN_TEST(test_decode_reports_absent_want_config_id);
