@@ -49,6 +49,11 @@
 #define IOS_ATT_MTU  185
 #define IOS_READ_MAX (IOS_ATT_MTU - 1)
 
+/* The largest write without response: MTU minus the three byte ATT header,
+ * what maximumWriteValueLength(for: .withoutResponse) returns. BLEConnection
+ * .send() uses that write type whenever ToRadio offers it (line 533). */
+#define IOS_WRITE_NO_RSP_MAX (IOS_ATT_MTU - 3)
+
 /* AccessoryManager.swift:126-128. */
 #define IOS_NONCE_CONFIG 69420
 #define IOS_NONCE_DB     69421
@@ -178,6 +183,8 @@ typedef struct {
     int queue_refused;
     int to_radio_writes;
     int to_radio_not_understood;
+    size_t to_radio_max_write; /* one write's limit, IOS_WRITE_NO_RSP_MAX */
+    int to_radio_oversize; /* writes longer than to_radio_max_write */
 
     /* Paced transport state. */
     IosTransport transport;
@@ -551,6 +558,7 @@ static inline void ios_device_advance(IosClient* c, uint32_t t) {
 static inline void ios_device_write(IosClient* c, const uint8_t* data, size_t len) {
     HandshakeReply reply;
     c->to_radio_writes++;
+    if(len > c->to_radio_max_write) c->to_radio_oversize++;
     if(c->transport == IosTransportPaced) ios_device_advance(c, c->now_ms);
 
     /* handle_to_radio resets the queue on a fresh stage one request. */
@@ -1141,6 +1149,7 @@ static inline void
     }
     c->transport = transport;
     c->queue_depth = IOS_MODEL_QUEUE_DEPTH;
+    c->to_radio_max_write = IOS_WRITE_NO_RSP_MAX;
     c->drain_interval_ms = IOS_MODEL_DRAIN_INTERVAL_MS;
     c->worker_poll_ms = IOS_MODEL_WORKER_POLL_MS;
     c->read_rtt_ms = IOS_MODEL_READ_RTT_MS;
@@ -1308,8 +1317,10 @@ static inline void ios_client_report(const IosClient* c) {
         c->frames_empty_reads,
         c->duplicate_reads);
     printf(
-        "  device: writes %d, not understood %d, queue refused %d\n",
+        "  device: writes %d (over %u bytes %d), not understood %d, queue refused %d\n",
         c->to_radio_writes,
+        (unsigned)c->to_radio_max_write,
+        c->to_radio_oversize,
         c->to_radio_not_understood,
         c->queue_refused);
     printf(

@@ -93,6 +93,10 @@ typedef struct {
      * rejects writes, and the two are indistinguishable without this. */
     uint16_t from_radio_handle;
     uint16_t from_num_handle;
+
+    /* ToRadio writes dropped because the value was longer than the buffer.
+     * Each one is also logged by the worker. */
+    uint32_t write_oversize;
 } MeshBleStats;
 
 void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out);
