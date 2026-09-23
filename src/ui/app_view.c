@@ -337,7 +337,14 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
         (unsigned long)st.fail_num);
     canvas_draw_str(canvas, 2, BODY_TOP, line);
 
-    snprintf(line, sizeof(line), "Stage:%s N:%lu", stage, (unsigned long)st.last_nonce);
+    /* Ov is ToRadio writes dropped as too long for the buffer. */
+    snprintf(
+        line,
+        sizeof(line),
+        "Stage:%s N:%lu Ov:%lu",
+        stage,
+        (unsigned long)st.last_nonce,
+        (unsigned long)st.write_oversize);
     canvas_draw_str(canvas, 2, BODY_TOP + ROW_H, line);
 
     snprintf(
