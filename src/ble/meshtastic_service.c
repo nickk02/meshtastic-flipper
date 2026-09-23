@@ -33,10 +33,22 @@
  * absorb a burst without blocking the radio thread. Dropping beats blocking:
  * a missed frame costs one message, a blocked radio thread costs every
  * subsequent one. */
-/* Deep enough to hold a whole stage one reply. The handshake queues the entire
- * sequence at once, and a queue that drops the tail sends the client a
- * truncated sequence it is documented to assume the shape of. */
-#define QUEUE_DEPTH 40
+/* Deep enough to hold a whole stage one reply plus what arrives while it
+ * drains. The handshake queues the entire sequence at once, and a queue that
+ * drops the tail sends the client a truncated sequence it is documented to
+ * assume the shape of.
+ *
+ * Stage one is 36 frames. While they drain, the phone asks for get_canned and
+ * get_ringtone, and those admin replies queue behind the rest. Received mesh
+ * packets need room on top of that once they are forwarded to the phone;
+ * today handle_to_radio is the only caller. At 40 that left four spare slots
+ * for all of it, one burst from refusing.
+ *
+ * Each slot holds QUEUE_MESSAGE_MAX (192 today) bytes, so 64 slots is 12,288
+ * bytes of payload, 12,544 with each slot's length word. The service is
+ * allocated from the heap, so this comes out of the 128KB free heap measured
+ * in docs/measurements.md, not out of the .fap. */
+#define QUEUE_DEPTH 64
 
 /* Declared value length for FromRadio, and the largest message the queue will
  * accept. The callback's length probe becomes Char_Value_Length in
@@ -115,6 +127,11 @@ struct MeshtasticBleService {
     uint32_t stat_events;
     uint32_t stat_vendor_events;
     uint16_t stat_last_attr_handle;
+    /* Frames meshtastic_ble_service_queue turned away because the queue was
+     * full, and how many in a row since it last accepted one. The run length
+     * rate-limits the log line so a burst cannot flood it. */
+    uint32_t stat_refused;
+    uint32_t refused_run;
 
     /* ToRadio writes arrive on the BLE stack's thread. They are copied here
      * and handled on a thread of our own.
@@ -387,9 +404,18 @@ bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* 
     furi_mutex_acquire(service->mutex, FuriWaitForever);
 
     if(service->pending >= QUEUE_DEPTH) {
+        service->stat_refused++;
+        /* The first refusal of a run, then every 16th. */
+        bool log_it = (service->refused_run++ % 16) == 0;
+        unsigned pending = (unsigned)service->pending;
         furi_mutex_release(service->mutex);
+        if(log_it) {
+            FURI_LOG_E(
+                TAG, "queue full, %u pending, %u byte frame refused", pending, (unsigned)len);
+        }
         return false;
     }
+    service->refused_run = 0;
 
     QueuedMessage* slot = &service->queue[service->head];
     memcpy(slot->data, data, len);
@@ -809,6 +835,7 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
         snap->events = service->stat_events;
         snap->vendor_events = service->stat_vendor_events;
         snap->last_attr_handle = service->stat_last_attr_handle;
+        snap->refused = service->stat_refused;
         snap->to_radio_handle = (uint16_t)(service->to_radio.handle + 1);
         snap->from_radio_handle = service->from_radio.handle;
         snap->from_num_handle = service->from_num.handle;

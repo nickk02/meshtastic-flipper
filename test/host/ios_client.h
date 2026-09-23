@@ -59,7 +59,7 @@
 #define IOS_MODEL_DRAIN_INTERVAL_MS 350
 #define IOS_MODEL_WORKER_POLL_MS    50
 #define IOS_MODEL_READ_RTT_MS       88
-#define IOS_MODEL_QUEUE_DEPTH       40
+#define IOS_MODEL_QUEUE_DEPTH       64 /* mirrors QUEUE_DEPTH in meshtastic_service.c */
 
 /* Step timeouts, AccessoryManager+Connect.swift. Step 5 is 10s with three
  * attempts; Step 3 is 30s; Step 5a is 120s. */
