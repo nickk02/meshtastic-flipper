@@ -153,6 +153,40 @@ size_t phone_encode_packet(
     return pb_writer_ok(&frame) ? pb_writer_len(&frame) : 0;
 }
 
+/* mesh.pb.h, QueueStatus. */
+#define QUEUESTATUS_FIELD_RES            1
+#define QUEUESTATUS_FIELD_FREE           2
+#define QUEUESTATUS_FIELD_MAXLEN         3
+#define QUEUESTATUS_FIELD_MESH_PACKET_ID 4
+
+size_t phone_encode_queue_status(
+    int32_t res,
+    uint32_t free_slots,
+    uint32_t maxlen,
+    uint32_t mesh_packet_id,
+    uint8_t* out,
+    size_t out_len) {
+    uint8_t body[32];
+    PbWriter inner;
+    PbWriter frame;
+
+    if(out == NULL) return 0;
+
+    pb_writer_init(&inner, body, sizeof(body));
+    /* Sign extended to 64 bits before the cast, which is what protobuf does
+     * with a negative int32: -1 becomes ten bytes, not five. */
+    pb_write_varint_field(&inner, QUEUESTATUS_FIELD_RES, (uint64_t)(int64_t)res);
+    pb_write_varint_field_always(&inner, QUEUESTATUS_FIELD_FREE, free_slots);
+    pb_write_varint_field_always(&inner, QUEUESTATUS_FIELD_MAXLEN, maxlen);
+    pb_write_varint_field(&inner, QUEUESTATUS_FIELD_MESH_PACKET_ID, mesh_packet_id);
+    if(!pb_writer_ok(&inner)) return 0;
+
+    pb_writer_init(&frame, out, out_len);
+    pb_write_submessage(&frame, FROMRADIO_FIELD_QUEUE_STATUS, body, pb_writer_len(&inner));
+
+    return pb_writer_ok(&frame) ? pb_writer_len(&frame) : 0;
+}
+
 /* Reads a base 128 varint and advances *pos. */
 static bool read_varint(const uint8_t* buf, size_t len, size_t* pos, uint64_t* out) {
     uint64_t value = 0;
@@ -413,6 +447,68 @@ bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce
     }
 
     return found;
+}
+
+/* mesh.pb.h, Heartbeat. */
+#define HEARTBEAT_FIELD_NONCE 1
+
+/* True when every field in a message has a legal tag and fits. scan_field
+ * reports "absent" and "malformed" the same way, and a heartbeat needs them
+ * apart: an absent nonce is 0, a malformed one is not a heartbeat at all. */
+static bool message_well_formed(const uint8_t* buf, size_t len) {
+    size_t pos = 0;
+
+    while(pos < len) {
+        uint64_t tag;
+        uint64_t value;
+        if(!read_varint(buf, len, &pos, &tag)) return false;
+        if((tag >> 3) == 0) return false;
+
+        switch(tag & 0x07) {
+        case 0:
+            if(!read_varint(buf, len, &pos, &value)) return false;
+            break;
+        case 1:
+            if(len - pos < 8) return false;
+            pos += 8;
+            break;
+        case 2:
+            if(!read_varint(buf, len, &pos, &value)) return false;
+            if(value > (uint64_t)(len - pos)) return false;
+            pos += (size_t)value;
+            break;
+        case 5:
+            if(len - pos < 4) return false;
+            pos += 4;
+            break;
+        default:
+            return false;
+        }
+    }
+    return true;
+}
+
+bool phone_decode_heartbeat(const uint8_t* buf, size_t len, uint32_t* nonce) {
+    const uint8_t* hb = NULL;
+    size_t hb_len = 0;
+    size_t pos = 0;
+    uint64_t tag;
+    uint64_t value = 0;
+
+    if(buf == NULL || nonce == NULL || len == 0) return false;
+
+    /* ToRadio.payload_variant is a oneof, so the first field is what was sent. */
+    if(!read_varint(buf, len, &pos, &tag)) return false;
+    if(tag != (((uint64_t)TORADIO_FIELD_HEARTBEAT << 3) | 2)) return false;
+
+    if(!scan_field(buf, len, TORADIO_FIELD_HEARTBEAT, &hb, &hb_len, NULL)) return false;
+    if(!message_well_formed(hb, hb_len)) return false;
+
+    *nonce = 0;
+    if(scan_field(hb, hb_len, HEARTBEAT_FIELD_NONCE, NULL, NULL, &value)) {
+        *nonce = (uint32_t)value;
+    }
+    return true;
 }
 
 size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_t out_len) {

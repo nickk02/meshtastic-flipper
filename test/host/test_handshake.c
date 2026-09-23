@@ -457,6 +457,104 @@ TEST(test_no_reply_when_none_wanted) {
     ASSERT_EQ_INT(phone_encode_admin_reply(&pid, &req, passkey, out, sizeof(out)), 0);
 }
 
+/* Heartbeat, answered with a queueStatus as PhoneAPI.cpp does. */
+
+static size_t make_heartbeat(uint32_t nonce, uint8_t* buf, size_t cap) {
+    uint8_t hb[8];
+    PbWriter w;
+    pb_writer_init(&w, hb, sizeof(hb));
+    pb_write_varint_field(&w, 1, nonce);
+    size_t hb_len = pb_writer_len(&w);
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_HEARTBEAT, hb, hb_len);
+    return pb_writer_len(&w);
+}
+
+TEST(test_heartbeat_gets_one_queue_status) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+    uint64_t value = 0;
+
+    handshake_init(&h, &id);
+    /* The nonce iOS sends is random in 2...UInt32.max. */
+    size_t len = make_heartbeat(0x9e3779b9u, to_radio, sizeof(to_radio));
+
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    /* Tag byte: FromRadio field 11, wire type 2. */
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+    ASSERT_EQ_INT(reply.messages[0].data[1], reply.messages[0].len - 2);
+
+    const uint8_t* qs = reply.messages[0].data + 2;
+    size_t qs_len = reply.messages[0].len - 2;
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 2, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_FREE_REPORT);
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 3, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_MAXLEN_REPORT);
+    /* res 0 and mesh_packet_id 0 are defaults and left out. */
+    ASSERT_TRUE(!has_varint_field(qs, qs_len, 1, &value));
+    ASSERT_TRUE(!has_varint_field(qs, qs_len, 4, &value));
+
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeIdle);
+}
+
+TEST(test_heartbeat_without_nonce_is_answered) {
+    /* Nonce absent means nonce 0, the firmware's plain keepalive. */
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+
+    handshake_init(&h, &id);
+    size_t len = make_heartbeat(0, to_radio, sizeof(to_radio));
+    ASSERT_EQ_INT(len, 2);
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+}
+
+TEST(test_heartbeat_nonce_one_gets_nothing) {
+    /* Nonce 1 is the firmware's NodeInfo broadcast trigger, not a keepalive.
+     * It is understood, so true, but nothing goes back to the phone. */
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+
+    handshake_init(&h, &id);
+    size_t len = make_heartbeat(1, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 0);
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeIdle);
+}
+
+TEST(test_heartbeat_does_not_move_the_stage) {
+    /* The connect flow sends a heartbeat between the two stages. It must not
+     * disturb where the handshake is. */
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+
+    handshake_init(&h, &id);
+    size_t len = make_want_config(PHONE_NONCE_CONFIG, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeConfigRequested);
+
+    len = make_heartbeat(0x12345678u, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeConfigRequested);
+
+    len = make_want_config(PHONE_NONCE_NODE_INFO, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    len = make_heartbeat(0x12345679u, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeComplete);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_starts_idle);
 RUN_TEST(test_stage_one_follows_the_firmware_order);
@@ -477,4 +575,8 @@ RUN_TEST(test_real_canned_message_request_is_recognised);
 RUN_TEST(test_every_observed_request_is_answered);
 RUN_TEST(test_no_reply_when_none_wanted);
 RUN_TEST(test_tolerates_null);
+RUN_TEST(test_heartbeat_gets_one_queue_status);
+RUN_TEST(test_heartbeat_without_nonce_is_answered);
+RUN_TEST(test_heartbeat_nonce_one_gets_nothing);
+RUN_TEST(test_heartbeat_does_not_move_the_stage);
 TEST_MAIN_END()

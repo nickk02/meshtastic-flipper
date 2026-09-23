@@ -113,8 +113,11 @@ TEST(test_stage_one_order_as_the_client_reads_it) {
     ios_client_init(&c, &cfg, IosTransportIdeal);
     ios_client_connect(&c);
 
-    /* my_info first, then the client has a device num. */
-    ASSERT_EQ_INT(c.variant_trace[0], IOS_FR_MY_INFO);
+    /* The Step 2 heartbeat's queueStatus first, as the firmware sends it
+     * before anything else (PhoneAPI.cpp getFromRadio), then my_info, after
+     * which the client has a device num. */
+    ASSERT_EQ_INT(c.variant_trace[0], IOS_FR_QUEUE_STATUS);
+    ASSERT_EQ_INT(c.variant_trace[1], IOS_FR_MY_INFO);
     /* The node's own NodeInfo, carrying the name, precedes metadata and
      * every config frame, since handleConfig drops frames until it has one. */
     int own_node_info = -1, first_config = -1, metadata = -1;
