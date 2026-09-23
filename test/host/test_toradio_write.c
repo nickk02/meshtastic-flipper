@@ -80,7 +80,9 @@ TEST(test_connect_writes_under_120_bytes) {
     ios_client_connect(&c);
     ios_client_report(&c);
     ASSERT_TRUE(c.to_radio_writes > 0);
-    ASSERT_TRUE(c.sent_set_config_tzdef > 0);
+    /* The device now sends a tzdef, so the phone writes no set_config. The
+     * requests it still makes (canned messages, ringtone) are covered. */
+    ASSERT_TRUE(c.sent_get_canned > 0 && c.sent_get_ringtone > 0);
     ASSERT_EQ_INT(c.to_radio_oversize, 0);
 }
 
