@@ -574,27 +574,6 @@ static size_t make_text_message(uint32_t packet_id, uint8_t* buf, size_t cap) {
 
     pb_writer_init(&w, packet, sizeof(packet));
     pb_write_fixed32_field_always(&w, 2, 0xFFFFFFFFu); /* to broadcast */
-/* ToRadio { packet { decoded { portnum: ADMIN_APP, payload: AdminMessage {
- * <field>: true }, want_response }, from, id } }, for any admin request. */
-static size_t
-    make_admin_request(uint32_t field, uint32_t packet_id, uint32_t from, uint8_t* buf, size_t cap) {
-    uint8_t admin[16];
-    uint8_t data[64];
-    uint8_t packet[96];
-    PbWriter w;
-
-    pb_writer_init(&w, admin, sizeof(admin));
-    pb_write_varint_field_always(&w, field, 1);
-    size_t admin_len = pb_writer_len(&w);
-
-    pb_writer_init(&w, data, sizeof(data));
-    pb_write_varint_field_always(&w, 1, 6); /* portnum ADMIN_APP */
-    pb_write_bytes_field(&w, 2, admin, admin_len);
-    pb_write_varint_field_always(&w, 3, 1); /* want_response */
-    size_t data_len = pb_writer_len(&w);
-
-    pb_writer_init(&w, packet, sizeof(packet));
-    pb_write_fixed32_field_always(&w, 1, from);
     pb_write_submessage(&w, 4, data, data_len);
     pb_write_fixed32_field_always(&w, 6, packet_id);
     size_t packet_len = pb_writer_len(&w);
@@ -656,6 +635,34 @@ TEST(test_admin_packet_gets_admin_reply_not_queue_status) {
     ASSERT_EQ_INT(reply.count, 1);
     /* FromRadio.packet, field 2, not queueStatus. */
     ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_PACKET << 3) | 2);
+}
+
+/* ToRadio { packet { decoded { portnum: ADMIN_APP, payload: AdminMessage {
+ * <field>: true }, want_response }, from, id } }, for any admin request. */
+static size_t
+    make_admin_request(uint32_t field, uint32_t packet_id, uint32_t from, uint8_t* buf, size_t cap) {
+    uint8_t admin[16];
+    uint8_t data[64];
+    uint8_t packet[96];
+    PbWriter w;
+
+    pb_writer_init(&w, admin, sizeof(admin));
+    pb_write_varint_field_always(&w, field, 1);
+    size_t admin_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, 1, 6); /* portnum ADMIN_APP */
+    pb_write_bytes_field(&w, 2, admin, admin_len);
+    pb_write_varint_field_always(&w, 3, 1); /* want_response */
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, 1, from);
+    pb_write_submessage(&w, 4, data, data_len);
+    pb_write_fixed32_field_always(&w, 6, packet_id);
+    size_t packet_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, buf, cap);
     pb_write_submessage(&w, 1, packet, packet_len);
     return pb_writer_len(&w);
 }
@@ -753,8 +760,6 @@ RUN_TEST(test_real_ringtone_request_is_recognised);
 RUN_TEST(test_real_canned_message_request_is_recognised);
 RUN_TEST(test_every_observed_request_is_answered);
 RUN_TEST(test_no_reply_when_none_wanted);
-RUN_TEST(test_every_reply_fits_one_phone_read);
-RUN_TEST(test_frame_past_the_read_limit_is_refused);
 RUN_TEST(test_tolerates_null);
 RUN_TEST(test_heartbeat_gets_one_queue_status);
 RUN_TEST(test_heartbeat_without_nonce_is_answered);
@@ -763,4 +768,6 @@ RUN_TEST(test_heartbeat_does_not_move_the_stage);
 RUN_TEST(test_text_message_gets_queue_status_with_its_id);
 RUN_TEST(test_malformed_packet_gets_nothing);
 RUN_TEST(test_admin_packet_gets_admin_reply_not_queue_status);
+RUN_TEST(test_every_reply_fits_one_phone_read);
+RUN_TEST(test_frame_past_the_read_limit_is_refused);
 TEST_MAIN_END()

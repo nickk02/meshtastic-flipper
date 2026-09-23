@@ -9,7 +9,6 @@
 #include "mesh_data.h"
 #include "pb_write.h"
 #include "phone_encode.h"
-#include "src/ble/meshtastic_handshake.h"
 
 /* Minimal reader, so the tests verify structure rather than trusting the
    writer to agree with itself. */
@@ -587,6 +586,9 @@ TEST(test_decode_packet_id_rejects_malformed_and_absent) {
     pb_write_varint_field_always(&w, TORADIO_FIELD_WANT_CONFIG_ID, PHONE_NONCE_CONFIG);
     ASSERT_TRUE(!phone_decode_packet_id(buf, pb_writer_len(&w), &id));
     ASSERT_TRUE(!phone_decode_packet_id(NULL, 4, &id));
+}
+
+#include "src/ble/meshtastic_handshake.h"
 /* Frame size cap */
 
 /* The largest identity a PhoneIdentity can hold: every string at its array
