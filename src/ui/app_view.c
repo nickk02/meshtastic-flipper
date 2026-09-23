@@ -340,6 +340,12 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
     snprintf(line, sizeof(line), "Stage:%s N:%lu", stage, (unsigned long)st.last_nonce);
     canvas_draw_str(canvas, 2, BODY_TOP + ROW_H, line);
 
+    /* X is vendor events the GATT handler rejected on event code alone. It
+     * sits right-aligned in the gap after "Stage:nodes N:69420", which leaves
+     * room for four digits. */
+    snprintf(line, sizeof(line), "X:%lu", (unsigned long)st.wrong_ecode);
+    canvas_draw_str_aligned(canvas, SCREEN_W - 2, BODY_TOP + ROW_H, AlignRight, AlignBottom, line);
+
     snprintf(
         line,
         sizeof(line),
