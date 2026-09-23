@@ -6,7 +6,8 @@
  * messages for that stage, then config_complete_id carrying the same nonce.
  *
  *   Stage 1, nonce 69420: MyNodeInfo, then config_complete
- *   Stage 2, nonce 69421: our NodeInfo, then config_complete
+ *   Stage 2, nonce 69421: our NodeInfo, one NodeInfo per heard node, then
+ *                         config_complete
  *
  * Real firmware also sends config blocks, module config, channels, metadata and
  * a file manifest. The client does not require any of them. Its own test
@@ -35,7 +36,33 @@ typedef enum {
 /* my_info, deviceuiConfig, own node_info, metadata, eight channel slots,
  * ten config variants, thirteen module config variants, config_complete. */
 #define HANDSHAKE_MAX_REPLIES 36
-#define HANDSHAKE_MAX_MESSAGE 192
+
+/* The largest FromRadio frame the phone can read. The iPhone negotiates ATT
+ * MTU 185 with this device, and one read returns at most the MTU minus the one
+ * byte ATT opcode. BLEConnection.read() reads once, with no long read, and
+ * drainPendingPackets disconnects on a frame that does not decode, which is
+ * what a truncated frame is (Meshtastic-Apple v2.7.21, BLEConnection.swift:196
+ * and :640). Nothing may queue a frame longer than this. */
+#define PHONE_FRAME_MAX 184
+
+#define HANDSHAKE_MAX_MESSAGE PHONE_FRAME_MAX
+
+/* What a queueStatus from this device reports. A real node reports its
+ * radio's transmit queue, RadioLibInterface::getQueueStatus, whose depth is
+ * MAX_TX_QUEUE 16 (firmware RadioInterface.h:18); an idle one therefore says
+ * 16 free of 16. The handshake has no view of a transmit queue, so it reports
+ * that fixed capacity, all of it free, rather than invent a live count. */
+#define HANDSHAKE_QUEUE_FREE_REPORT   16
+#define HANDSHAKE_QUEUE_MAXLEN_REPORT 16
+
+/* Stage two is the own NodeInfo and config_complete, each repeated (see
+ * STAGE_TWO_REPEATS), with one NodeInfo per heard node between them. Heard
+ * nodes are capped so the stage fits HANDSHAKE_MAX_REPLIES, which also keeps
+ * it below the service's 40 slot queue with room for the admin replies stage
+ * one leaves behind. With the roster full, the least recently heard nodes are
+ * the ones left out. */
+#define HANDSHAKE_STAGE_TWO_REPEATS 1
+#define HANDSHAKE_MAX_OTHER_NODES   (HANDSHAKE_MAX_REPLIES - 2 * HANDSHAKE_STAGE_TWO_REPEATS)
 
 typedef struct {
     uint8_t data[HANDSHAKE_MAX_MESSAGE];
@@ -57,12 +84,23 @@ typedef struct {
     PhoneAdminRequest admin;
     PhoneIdentity identity;
     HandshakeStage stage;
+    /* Heard nodes for stage two. NULL means none. Borrowed, not owned. */
+    const NodeRoster* roster;
 } Handshake;
 
 /* The config record is copied, not referenced. The handshake runs on the BLE
  * worker thread and the record is edited from the UI thread, so sharing a
  * pointer would need a lock on every field read. */
 void handshake_init(Handshake* h, const MeshConfig* config);
+
+/* Nodes heard on the air, sent in stage two after this node's own NodeInfo.
+ *
+ * Held by pointer and read during handshake_handle_to_radio. The roster the
+ * app keeps is written by the radio thread under the app's mutex, and this
+ * runs on the BLE worker, so the caller must not hand over that live roster:
+ * the service passes a snapshot it copied under the app's mutex instead (see
+ * meshtastic_ble_service_set_roster). NULL sends no other nodes. */
+void handshake_set_roster(Handshake* h, const NodeRoster* roster);
 
 /* Seed the session passkey the admin exchange hands to the phone.
  *
@@ -76,6 +114,14 @@ void handshake_set_session_passkey(Handshake* h, const uint8_t* passkey);
  * Fills reply with the FromRadio messages to queue, in order. Returns false
  * when the message carries no want_config_id or the nonce is unrecognized, in
  * which case reply is emptied and nothing should be sent.
+ *
+ * A heartbeat is answered with one queueStatus, as PhoneAPI.cpp does, unless
+ * its nonce is 1, which the firmware treats as a NodeInfo broadcast trigger
+ * and does not answer. Both return true: the heartbeat was understood.
+ *
+ * A ToRadio.packet that is not an admin request but carries a MeshPacket.id
+ * gets one queueStatus with that id as mesh_packet_id, the firmware's
+ * acknowledgement that it took the packet.
  *
  * An unknown nonce is rejected rather than guessed at. Replying to a stage the
  * app did not ask for makes it discard the response and stall. */

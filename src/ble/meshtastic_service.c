@@ -10,6 +10,7 @@
 #include <furi_hal_version.h>
 #include <string.h>
 
+#include "src/ble/meshtastic_gatt_event.h"
 #include "src/ble/meshtastic_handshake.h"
 
 #define TAG "MeshBLE"
@@ -33,10 +34,22 @@
  * absorb a burst without blocking the radio thread. Dropping beats blocking:
  * a missed frame costs one message, a blocked radio thread costs every
  * subsequent one. */
-/* Deep enough to hold a whole stage one reply. The handshake queues the entire
- * sequence at once, and a queue that drops the tail sends the client a
- * truncated sequence it is documented to assume the shape of. */
-#define QUEUE_DEPTH 40
+/* Deep enough to hold a whole stage one reply plus what arrives while it
+ * drains. The handshake queues the entire sequence at once, and a queue that
+ * drops the tail sends the client a truncated sequence it is documented to
+ * assume the shape of.
+ *
+ * Stage one is 36 frames. While they drain, the phone asks for get_canned and
+ * get_ringtone, and those admin replies queue behind the rest. Received mesh
+ * packets need room on top of that once they are forwarded to the phone;
+ * today handle_to_radio is the only caller. At 40 that left four spare slots
+ * for all of it, one burst from refusing.
+ *
+ * Each slot holds QUEUE_MESSAGE_MAX (192 today) bytes, so 64 slots is 12,288
+ * bytes of payload, 12,544 with each slot's length word. The service is
+ * allocated from the heap, so this comes out of the 128KB free heap measured
+ * in docs/measurements.md, not out of the .fap. */
+#define QUEUE_DEPTH 64
 
 /* Declared value length for FromRadio, and the largest message the queue will
  * accept. The callback's length probe becomes Char_Value_Length in
@@ -44,13 +57,31 @@
  * that out of a fixed ATT value array shared with every other service on the
  * device. Asking for more than we use is not free.
  *
- * 192 is HANDSHAKE_MAX_MESSAGE. Nothing we send can exceed it, and the queue
- * rejects anything larger so we never hold a message we cannot publish. */
-#define QUEUE_MESSAGE_MAX 192
+ * PHONE_FRAME_MAX is the most one phone read returns, see
+ * meshtastic_handshake.h. The queue rejects anything larger so we never hold a
+ * message the phone would read truncated and disconnect over. */
+#define QUEUE_MESSAGE_MAX PHONE_FRAME_MAX
 
-/* Declared value length for ToRadio. The phone's handshake writes are a few
- * bytes; this is headroom, not a target. */
-#define TO_RADIO_VALUE_MAX 128
+/* Declared value length for ToRadio, and the size of the buffer a write is
+ * copied into. The declared length is the most the stack will store for the
+ * attribute, so the buffer is the same size.
+ *
+ * The firmware sizes ToRadio at MAX_TO_FROM_RADIO_SIZE, 512 (PhoneAPI.h:19),
+ * but that is its own buffer, not what the phone sends. The largest ToRadio
+ * the phone sends during connect is the set_config tzdef write, well under
+ * 120 bytes. After connect it sends set_owner, about 90 bytes with a 40
+ * character long name, and set_config, whose Config is at most 207 bytes
+ * (meshtastic_Config_size, config.pb.h:1160), about 241 bytes once wrapped in
+ * AdminMessage, Data, MeshPacket and ToRadio. 128 did not hold the last.
+ *
+ * 243 rather than 256. aci_gatt_attribute_modified_event_rp0 carries at most
+ * (BLE_EVT_MAX_PARAM_LEN - 2) - 8 = 245 value bytes (ble_types.h:3243, with
+ * HCI_EVENT_MAX_PARAM_LEN 255 at ble_std.h:37). A longer value reaches the
+ * event handler split across events. At 243 every write the stack accepts
+ * arrives in one event, and it is the length the firmware's own serial
+ * service gives the characteristic a phone writes to,
+ * BLE_SVC_SERIAL_CHAR_VALUE_LEN_MAX in services/serial_service.h. */
+#define TO_RADIO_VALUE_MAX 243
 
 /* If a handshake reply could ever exceed the declared FromRadio length, the
  * queue would silently refuse it and the phone would wait forever for a message
@@ -64,12 +95,33 @@ typedef struct {
     size_t len;
 } QueuedMessage;
 
+/* What a write_queue entry asks the worker to do. A ToRadio write is the
+ * common case. A disconnect is posted by the Bt service's status callback and
+ * travels the same queue, so the reset lands after every write the old session
+ * made and before any write the new one makes. It is a kind of its own rather
+ * than a zero-length write, because an empty ToRadio write is possible and
+ * must not clear the queue. */
+typedef enum {
+    PendingWriteToRadio,
+    PendingWriteDisconnect,
+} PendingWriteKind;
+
 /* A ToRadio write, copied out of the BLE callback so the stack thread can
- * return immediately. */
+ * return immediately. oversize_len is nonzero when the value did not fit in
+ * data: the write is then dropped, and the worker logs it, because the event
+ * handler runs on the stack's thread and must not. events counts the
+ * attribute-modified events the value arrived in. */
 typedef struct {
-    uint8_t data[QUEUE_MESSAGE_MAX];
+    uint8_t data[TO_RADIO_VALUE_MAX];
     size_t len;
+    PendingWriteKind kind;
+    uint16_t oversize_len;
+    uint8_t events;
 } PendingWrite;
+
+/* Posted by meshtastic_ble_service_on_disconnect. Static so the Bt service
+ * thread, whose stack we do not size, never builds a 200 byte struct on it. */
+static const PendingWrite disconnect_message = {.len = 0, .kind = PendingWriteDisconnect};
 
 #define WRITE_QUEUE_DEPTH 4
 
@@ -114,7 +166,15 @@ struct MeshtasticBleService {
     uint32_t stat_fail_num;
     uint32_t stat_events;
     uint32_t stat_vendor_events;
+    uint32_t stat_wrong_ecode;
     uint16_t stat_last_attr_handle;
+    /* Frames meshtastic_ble_service_queue turned away because the queue was
+     * full, and how many in a row since it last accepted one. The run length
+     * rate-limits the log line so a burst cannot flood it. */
+    uint32_t stat_refused;
+    uint32_t refused_run;
+    /* ToRadio writes dropped because they did not fit TO_RADIO_VALUE_MAX. */
+    uint32_t stat_write_oversize;
 
     /* ToRadio writes arrive on the BLE stack's thread. They are copied here
      * and handled on a thread of our own.
@@ -131,11 +191,20 @@ struct MeshtasticBleService {
 
     /* Staging for one inbound write. Owned here for the same reason as reply
      * below: the event handler runs on the BLE stack's thread and this struct
-     * is 260 bytes, too much to put on a stack we do not size. */
+     * is about 250 bytes, too much to put on a stack we do not size. It also
+     * holds a value that arrives in more than one event while it is rebuilt. */
     PendingWrite inbound;
 
     Handshake handshake;
     MeshConfig config;
+
+    /* The app's live roster and the mutex that guards it, and the copy the
+     * handshake actually reads. The live one is written by the radio thread,
+     * so it is copied under the app's mutex when stage two is asked for, and
+     * the handshake only ever sees the copy. The copy belongs to the worker. */
+    const NodeRoster* roster_source;
+    FuriMutex* roster_mutex;
+    NodeRoster roster_copy;
 
     /* Owned here rather than declared in the event handler. That handler runs
      * on the BLE stack's thread, whose stack we neither size nor control, and
@@ -261,7 +330,17 @@ static const BleGattCharacteristicParams to_radio_params = {
     .data.callback.context = NULL,
     .uuid.Char_UUID_128 = UUID_REVERSED_TORADIO,
     .uuid_type = UUID_TYPE_128,
-    .char_properties = CHAR_PROP_WRITE | CHAR_PROP_WRITE_WITHOUT_RESP,
+    /* Write with response only. Meshtastic-Apple v2.7.21 BLEConnection.swift
+     * send() picks .withoutResponse whenever the characteristic offers it
+     * (line 533), so offering both meant every ToRadio went without response.
+     * That write is fire and forget, limited to MTU minus 3 (182 bytes at MTU
+     * 185): performWrite() logs "EXCEEDS negotiated limit" (line 588) and the
+     * phone learns nothing else. With response, CoreBluetooth turns a value
+     * above that limit into a long write (prepare and execute), and every
+     * write gets an ATT response. A refusal then reaches didWriteValueFor,
+     * and send() retries CBATTError.insufficientResources with backoff
+     * (lines 534-570) instead of the write vanishing. */
+    .char_properties = CHAR_PROP_WRITE,
     .security_permissions = ATTR_PERMISSION_NONE,
     .gatt_evt_mask = GATT_NOTIFY_ATTRIBUTE_WRITE,
     .is_variable = CHAR_VALUE_LEN_VARIABLE,
@@ -382,14 +461,31 @@ static void drain_step(MeshtasticBleService* service) {
 
 bool meshtastic_ble_service_queue(MeshtasticBleService* service, const uint8_t* data, size_t len) {
     if(service == NULL || data == NULL) return false;
-    if(len == 0 || len > QUEUE_MESSAGE_MAX) return false;
+    if(len == 0) return false;
+    if(len > QUEUE_MESSAGE_MAX) {
+        FURI_LOG_E(
+            TAG,
+            "frame of %u bytes exceeds the %u byte read limit, dropped",
+            (unsigned)len,
+            (unsigned)QUEUE_MESSAGE_MAX);
+        return false;
+    }
 
     furi_mutex_acquire(service->mutex, FuriWaitForever);
 
     if(service->pending >= QUEUE_DEPTH) {
+        service->stat_refused++;
+        /* The first refusal of a run, then every 16th. */
+        bool log_it = (service->refused_run++ % 16) == 0;
+        unsigned pending = (unsigned)service->pending;
         furi_mutex_release(service->mutex);
+        if(log_it) {
+            FURI_LOG_E(
+                TAG, "queue full, %u pending, %u byte frame refused", pending, (unsigned)len);
+        }
         return false;
     }
+    service->refused_run = 0;
 
     QueuedMessage* slot = &service->queue[service->head];
     memcpy(slot->data, data, len);
@@ -418,6 +514,46 @@ size_t meshtastic_ble_service_pending(MeshtasticBleService* service) {
 
 bool meshtastic_ble_service_is_connected(MeshtasticBleService* service) {
     return service != NULL && handshake_is_complete(&service->handshake);
+}
+
+void meshtastic_ble_service_set_roster(
+    MeshtasticBleService* service,
+    const NodeRoster* roster,
+    FuriMutex* roster_mutex) {
+    if(service == NULL) return;
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    service->roster_source = roster;
+    service->roster_mutex = roster_mutex;
+    furi_mutex_release(service->mutex);
+}
+
+/* Copies the app's roster for stage two. Runs on the worker.
+ *
+ * Only the app's mutex is held while copying, never together with the
+ * service mutex, so there is no lock order to get wrong against the radio
+ * thread, which takes the app's mutex and then, separately, queue(). */
+static void snapshot_roster(MeshtasticBleService* service) {
+    const NodeRoster* source;
+    FuriMutex* lock;
+
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    source = service->roster_source;
+    lock = service->roster_mutex;
+    furi_mutex_release(service->mutex);
+
+    if(source == NULL || lock == NULL) {
+        node_roster_init(&service->roster_copy);
+    } else {
+        furi_mutex_acquire(lock, FuriWaitForever);
+        service->roster_copy = *source;
+        furi_mutex_release(lock);
+    }
+    handshake_set_roster(&service->handshake, &service->roster_copy);
+
+    FURI_LOG_I(
+        TAG,
+        "stage two: %u heard nodes in the roster",
+        (unsigned)node_roster_count(&service->roster_copy));
 }
 
 void meshtastic_ble_service_set_callback(
@@ -451,10 +587,29 @@ static void hex_prefix(const uint8_t* data, size_t len, char* out, size_t out_le
     out[n] = 0;
 }
 
-static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, size_t len) {
+static void handle_to_radio(MeshtasticBleService* service, const PendingWrite* write) {
+    const uint8_t* data = write->data;
+    size_t len = write->len;
     uint32_t nonce = 0;
     bool understood = false;
     char hex[3 * 40 + 1];
+
+    /* Logged here, not where it was detected: that was the stack's thread. */
+    if(write->oversize_len > 0) {
+        FURI_LOG_E(
+            TAG,
+            "ToRadio write of %u bytes exceeds %u, dropped",
+            (unsigned)write->oversize_len,
+            (unsigned)TO_RADIO_VALUE_MAX);
+        return;
+    }
+    if(write->events > 1) {
+        FURI_LOG_I(
+            TAG,
+            "ToRadio write of %u bytes arrived in %u events",
+            (unsigned)len,
+            (unsigned)write->events);
+    }
 
     hex_prefix(data, len, hex, sizeof(hex));
 
@@ -470,7 +625,13 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
              * items a prior connection never got to (because it disconnected
              * mid drain) stay in the queue and consume capacity meant for the
              * new session, which is exactly what turned into "queue full,
-             * reply 31 of 36 dropped" on real hardware. */
+             * reply 31 of 36 dropped" on real hardware.
+             *
+             * The reply to the Step 2 heartbeat goes with it. The firmware
+             * would keep it (heartbeatReceived survives want_config,
+             * PhoneAPI.cpp:411 and :581), but the iOS client never waits for
+             * a queueStatus on BLE, and this reset is hardware-verified, so
+             * it stays a plain clear. */
             furi_mutex_acquire(service->mutex, FuriWaitForever);
             service->head = 0;
             service->tail = 0;
@@ -478,13 +639,20 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
             service->drain_active = false;
             service->doorbell_rung = false;
             furi_mutex_release(service->mutex);
+        } else if(nonce == PHONE_NONCE_NODE_INFO) {
+            snapshot_roster(service);
         }
-    } else if(len > 0 && (data[0] >> 3) == TORADIO_FIELD_HEARTBEAT) {
-        /* The settle heartbeat between stages. The firmware does not echo it,
-         * so sending nothing back is correct, and this line is here so a silent
-         * device can be told apart from a deaf one. */
+    } else if(phone_decode_heartbeat(data, len, &nonce)) {
+        /* The settle heartbeat between stages. The firmware answers it with
+         * one queueStatus (PhoneAPI.cpp, heartbeatReceived), which the
+         * handshake below builds, except for nonce 1, its NodeInfo broadcast
+         * trigger, which gets no reply. */
         understood = true;
-        FURI_LOG_I(TAG, "ToRadio heartbeat, no reply expected");
+        if(nonce == 1) {
+            FURI_LOG_I(TAG, "ToRadio heartbeat nonce=1, no reply");
+        } else {
+            FURI_LOG_I(TAG, "ToRadio heartbeat, queueing queueStatus");
+        }
     } else {
         /* Decoded independently of the handshake's own admin handling, purely
          * to log which field a real connection actually asked for. The device
@@ -493,6 +661,7 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
          * three requests a real phone sends (canned messages, ringtone,
          * set_config) are the same three seen here, and in what order. */
         PhoneAdminRequest admin_probe;
+        uint32_t packet_id = 0;
         if(phone_decode_admin_request(data, len, &admin_probe)) {
             FURI_LOG_I(
                 TAG,
@@ -500,6 +669,12 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
                 (unsigned long)admin_probe.admin_field,
                 (int)admin_probe.want_response,
                 (unsigned long)admin_probe.packet_id);
+        } else if(phone_decode_packet_id(data, len, &packet_id)) {
+            /* Any other packet, such as a text message. The handshake answers
+             * it with a queueStatus carrying this id, as the firmware does. */
+            understood = true;
+            FURI_LOG_I(
+                TAG, "ToRadio packet id=%08lx, queueing queueStatus", (unsigned long)packet_id);
         }
     }
 
@@ -559,37 +734,11 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
 }
 
 /* The BLE stack hands every GATT event to every registered handler. We only
- * want writes to our ToRadio characteristic.
- *
- * The SDK does not expose the stack's packet structs to applications. Its own
- * comment in event_dispatcher.h says so: "Using other types so not to leak all
- * the BLE stack headers". The three below are copied verbatim from the
- * STM32WB BLE stack, ble_legacy.h, and must stay byte-compatible with it.
- *
- * ACI_GATT_ATTRIBUTE_MODIFIED_VSEVT_CODE is deliberately not used. It is not
- * in the FAP SDK and I could not obtain it from a citable source, so the
- * filter here is the event type plus an exact handle match instead. That is
- * looser than the firmware's own serial service, which checks the event code
- * as well. Adding that check is worthwhile hardening once the constant can be
- * confirmed against ble_events.h. Until then a stray vendor event would have
- * to carry our exact attribute handle at the right offset to get through, and
- * anything that does still has to survive the protobuf parser. */
-typedef struct __attribute__((packed)) {
-    uint8_t type;
-    uint8_t data[1];
-} MeshHciUartPacket;
-
-typedef struct __attribute__((packed)) {
-    uint8_t evt;
-    uint8_t plen;
-    uint8_t data[1];
-} MeshHciEventPacket;
-
-typedef struct __attribute__((packed)) {
-    uint16_t ecode;
-    uint8_t data[1];
-} MeshBlecoreEvent;
-
+ * want writes to our ToRadio characteristic, so the filter is the same three
+ * steps the firmware's own serial service takes, serial_service.c:81-91: a
+ * vendor event, whose event code is attribute-modified, on our value handle.
+ * The packet structs and the event code are in meshtastic_gatt_event.h, with
+ * their sources. */
 static BleEventAckStatus gatt_event_handler(void* event, void* context) {
     MeshtasticBleService* service = context;
 
@@ -605,7 +754,16 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
 
     service->stat_vendor_events++;
 
+    /* Only ACI_GATT_ATTRIBUTE_MODIFIED_EVENT carries the layout read below.
+     * Any other vendor event (an MTU exchange, a TX pool notice, a GAP
+     * event) has a different payload, and reading it as attribute-modified
+     * would compare our handle against whatever bytes happen to sit there. */
     MeshBlecoreEvent* blecore = (MeshBlecoreEvent*)packet->data;
+    if(blecore->ecode != MESH_ACI_GATT_ATTRIBUTE_MODIFIED_VSEVT_CODE) {
+        service->stat_wrong_ecode++;
+        return BleEventNotAck;
+    }
+
     aci_gatt_attribute_modified_event_rp0* modified =
         (aci_gatt_attribute_modified_event_rp0*)blecore->data;
     service->stat_last_attr_handle = modified->Attr_Handle;
@@ -615,17 +773,99 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
      * serial_service.c:82-90. */
     if(modified->Attr_Handle != service->to_radio.handle + 1) return BleEventNotAck;
 
-    /* Copy and post. Nothing here may call back into the BLE stack, and
-     * nothing here may be large: this is the stack thread's stack. */
-    size_t len = modified->Attr_Data_Length;
-    if(len > QUEUE_MESSAGE_MAX) len = QUEUE_MESSAGE_MAX;
-    memcpy(service->inbound.data, modified->Attr_Data, len);
-    service->inbound.len = len;
+    /* Copy and post. Nothing here may call back into the BLE stack, nothing
+     * here may be large, and nothing here may log: this is the stack thread.
+     *
+     * Offset, per ble_events.h: bits 14-0 are where this piece of the value
+     * starts, and bit 15 set means more events follow for the same value.
+     * At TO_RADIO_VALUE_MAX 243 a whole value fits one event (see there), so
+     * a write normally arrives once, with Offset 0. The stack documentation
+     * does not say whether a long write (prepare and execute) is reported
+     * once, reassembled, or once per prepared piece. Either way each piece is
+     * placed at its offset, and the value is posted when bit 15 is clear.
+     * If the stack reports per piece, the first piece is also posted on its
+     * own, fails to parse, and is logged as not understood; the complete
+     * value follows. The phone gives no total length, so there is nothing
+     * better to wait for. The copy is bounded by the buffer either way. */
+    uint16_t offset = modified->Offset & 0x7FFF;
+    bool more = (modified->Offset & 0x8000) != 0;
+    size_t end = (size_t)offset + modified->Attr_Data_Length;
 
+    if(offset == 0) {
+        service->inbound.len = 0;
+        service->inbound.oversize_len = 0;
+        service->inbound.events = 0;
+        service->inbound.kind = PendingWriteToRadio;
+    }
+    if(service->inbound.events < UINT8_MAX) service->inbound.events++;
+
+    if(end > TO_RADIO_VALUE_MAX) {
+        /* Never truncate: a cut protobuf can still parse as something else.
+         * Record how far the value reached and drop it. */
+        if(end > service->inbound.oversize_len) {
+            service->inbound.oversize_len = end > UINT16_MAX ? UINT16_MAX : (uint16_t)end;
+        }
+    } else if(service->inbound.oversize_len == 0) {
+        memcpy(service->inbound.data + offset, modified->Attr_Data, modified->Attr_Data_Length);
+        service->inbound.len = end;
+    }
+
+    if(more) return BleEventAckFlowEnable;
+
+    if(service->inbound.oversize_len > 0) service->stat_write_oversize++;
     service->stat_writes++;
     furi_message_queue_put(service->write_queue, &service->inbound, 0);
 
     return BleEventAckFlowEnable;
+}
+
+/* The phone went away. Runs on the worker, never on the Bt service thread.
+ *
+ * Without this, a link that drops mid batch leaves the queue stepping and the
+ * last frame published. A phone reconnecting two seconds later (the connect
+ * retry delay) reads that frame in its Step 2 heartbeat drain, before its own
+ * want_config_id is sent, and processes frames from the old session. The
+ * clear in handle_to_radio on want_config_id 69420 comes too late for that
+ * read. test/host/test_ios_client.c models both cases.
+ *
+ * The lock is not held across publish_head, for the same reason as in
+ * drain_step: from_radio_data takes it from inside the update. */
+static void reset_session(MeshtasticBleService* service) {
+    furi_mutex_acquire(service->mutex, FuriWaitForever);
+    size_t dropped = service->pending;
+    /* A status callback also arrives when advertising starts or drops to low
+     * power with no phone involved. Only a reset that clears something is
+     * logged, so the line means a session really ended. */
+    bool had_session = dropped > 0 || service->drain_active ||
+                       handshake_stage(&service->handshake) != HandshakeIdle;
+    service->head = 0;
+    service->tail = 0;
+    service->pending = 0;
+    service->drain_active = false;
+    service->doorbell_rung = false;
+    handshake_reset(&service->handshake);
+    furi_mutex_release(service->mutex);
+
+    /* With pending at 0 this stores a zero-length value, so the next phone's
+     * first read ends its drain instead of returning an old frame. */
+    publish_head(service, false);
+
+    if(had_session) {
+        FURI_LOG_I(
+            TAG, "phone disconnected, queue cleared (%u pending dropped)", (unsigned)dropped);
+    }
+}
+
+void meshtastic_ble_service_on_disconnect(MeshtasticBleService* service) {
+    if(service == NULL) return;
+
+    /* Called on the Bt service thread. It must not take the service mutex,
+     * which the worker may hold while inside the BLE stack, and must not wait,
+     * so it only posts. If the queue is full, the want_config_id 69420 clear
+     * in handle_to_radio is still there as the fallback. */
+    if(furi_message_queue_put(service->write_queue, &disconnect_message, 0) != FuriStatusOk) {
+        FURI_LOG_W(TAG, "write queue full, disconnect reset not posted");
+    }
 }
 
 /* 350ms per drain step, set from a device-side measurement.
@@ -669,7 +909,11 @@ static int32_t ble_worker(void* context) {
     while(service->worker_running) {
         if(furi_message_queue_get(service->write_queue, &write, WORKER_POLL_MS) == FuriStatusOk) {
             if(!service->worker_running) break;
-            handle_to_radio(service, write.data, write.len);
+            if(write.kind == PendingWriteDisconnect) {
+                reset_session(service);
+            } else {
+                handle_to_radio(service, &write);
+            }
         }
         if(!service->worker_running) break;
 
@@ -790,7 +1034,10 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
         snap->fail_num = service->stat_fail_num;
         snap->events = service->stat_events;
         snap->vendor_events = service->stat_vendor_events;
+        snap->wrong_ecode = service->stat_wrong_ecode;
         snap->last_attr_handle = service->stat_last_attr_handle;
+        snap->refused = service->stat_refused;
+        snap->write_oversize = service->stat_write_oversize;
         snap->to_radio_handle = (uint16_t)(service->to_radio.handle + 1);
         snap->from_radio_handle = service->from_radio.handle;
         snap->from_num_handle = service->from_num.handle;

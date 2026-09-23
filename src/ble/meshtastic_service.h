@@ -33,6 +33,16 @@ void meshtastic_ble_service_set_callback(
     MeshtasticBleToRadioCallback callback,
     void* context);
 
+/* Where stage two finds the nodes heard on the air.
+ *
+ * roster is the app's own, written by the radio thread under roster_mutex.
+ * The service copies it under that mutex when the phone asks for stage two,
+ * and the handshake reads only the copy, so no name can be read half written. */
+void meshtastic_ble_service_set_roster(
+    MeshtasticBleService* service,
+    const NodeRoster* roster,
+    FuriMutex* roster_mutex);
+
 /* Queue a FromRadio message for the phone to read.
  *
  * Returns false when the queue is full. Dropping is preferable to blocking the
@@ -83,6 +93,10 @@ typedef struct {
      * different problem from being called and rejecting the event. */
     uint32_t events;
     uint32_t vendor_events;
+    /* Vendor events that were not attribute-modified, so the handler rejected
+     * them before looking at the handle. Nonzero is normal: the stack sends
+     * other vendor events too. It says the event code filter is doing work. */
+    uint32_t wrong_ecode;
     uint16_t last_attr_handle; /* handle from the last attribute-modified event */
     uint16_t to_radio_handle; /* the handle we compare against */
 
@@ -93,9 +107,22 @@ typedef struct {
      * rejects writes, and the two are indistinguishable without this. */
     uint16_t from_radio_handle;
     uint16_t from_num_handle;
+
+    /* Frames refused because the FromRadio queue was full. Anything above zero
+     * means the phone missed a message the device built. */
+    uint32_t refused;
+
+    /* ToRadio writes dropped because the value was longer than the buffer.
+     * Each one is also logged by the worker. */
+    uint32_t write_oversize;
 } MeshBleStats;
 
 void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* out);
+
+/* The phone disconnected. Safe to call from the Bt service thread: it only
+ * posts to the worker, which clears the queue, publishes an empty FromRadio
+ * value and returns the handshake to idle. */
+void meshtastic_ble_service_on_disconnect(MeshtasticBleService* service);
 
 /* True once a phone has completed both handshake stages. */
 bool meshtastic_ble_service_is_connected(MeshtasticBleService* service);

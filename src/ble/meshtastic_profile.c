@@ -155,6 +155,30 @@ static const FuriHalBleProfileTemplate profile_template = {
 
 const FuriHalBleProfileTemplate* ble_profile_meshtastic = &profile_template;
 
+/* The only place this app learns the phone went away. Runs on the Bt service
+ * thread (bt.c:553-559), so it posts and returns.
+ *
+ * Any status other than Connected is treated as disconnected. A link drop never
+ * reports itself: GapEventTypeDisconnected does not change the status
+ * (bt.c:297-307), but gap.c:143-146 restarts advertising first, and that emits
+ * GapEventTypeStartAdvertising (gap.c:472), which bt.c:308-310 reports as
+ * BtStatusAdvertising. Off is what advertising being stopped reports
+ * (gap.c:477-501, bt.c:312-314), and that also terminates any connection.
+ *
+ * Connected is reported only on pairing complete (gap.c:280), and this profile
+ * does not pair (GapPairingNone above, and gap.c:196 only requests security
+ * when pairing is on). So "phone connected" appears only if a phone pairs of
+ * its own accord, and Advertising is the status throughout a normal session. */
+static void bt_status_changed(BtStatus status, void* context) {
+    MeshtasticBleService* service = context;
+
+    if(status == BtStatusConnected) {
+        FURI_LOG_I(TAG, "phone connected");
+    } else {
+        meshtastic_ble_service_on_disconnect(service);
+    }
+}
+
 MeshtasticBleService* meshtastic_ble_start(const MeshConfig* config) {
     if(config != NULL) {
         pending_config = *config;
@@ -185,6 +209,7 @@ MeshtasticBleService* meshtastic_ble_start(const MeshConfig* config) {
     }
 
     MeshtasticProfile* profile = (MeshtasticProfile*)base;
+    bt_set_status_changed_callback(bt, bt_status_changed, profile->service);
     furi_record_close(RECORD_BT);
 
     /* The Bt service only starts advertising when Bluetooth is enabled in
@@ -206,6 +231,10 @@ void meshtastic_ble_stop(MeshtasticBleService* service) {
      * profile running would stop the Flipper pairing with its own app until
      * the next reboot. */
     Bt* bt = furi_record_open(RECORD_BT);
+    /* Cleared before the restore, which frees the service. The restore runs
+     * on the Bt thread after any callback already in flight, so none can
+     * reach the service once it is gone. */
+    bt_set_status_changed_callback(bt, NULL, NULL);
     bt_profile_restore_default(bt);
     furi_record_close(RECORD_BT);
     ble_state = MeshBleIdle;

@@ -12,10 +12,14 @@ Output is pure ASCII regardless of the payload contents, since every byte is
 emitted in hex.
 """
 
+import hashlib
 import struct
 import sys
 
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 try:
     from meshtastic.protobuf import mesh_pb2, portnums_pb2
@@ -100,6 +104,61 @@ CASES = [
 ]
 
 
+# Whole over-the-air LongFast frames of the shape the receive path sees, for
+# the end-to-end test that decodes one and forwards it to the phone. Each is
+# the 16 byte header followed by AES128-CTR of a Data protobuf, with the
+# nonce from build_nonce and the default key (PSK index 1).
+#
+#   label, portnum, payload, to, from, packet_id, hop_limit, hop_start, relay
+RX_FROM = 0xDEADBEEF
+
+
+def build_user_payload():
+    user = mesh_pb2.User()
+    user.id = "!%08x" % RX_FROM
+    user.long_name = "Vector Node"
+    user.short_name = "VECT"
+    return user.SerializeToString()
+
+
+RX_CASES = [
+    ("TEXT", portnums_pb2.PortNum.TEXT_MESSAGE_APP,
+     "hello from a real LongFast frame".encode("utf-8"),
+     0xFFFFFFFF, RX_FROM, 0x1A2B3C4D, 3, 3, RX_FROM & 0xFF),
+    ("NODEINFO", portnums_pb2.PortNum.NODEINFO_APP, build_user_payload(),
+     0xFFFFFFFF, RX_FROM, 0x5E6F7081, 2, 3, RX_FROM & 0xFF),
+]
+
+
+def write_rx_cases(out):
+    key = expand_psk(1)
+    chash = channel_hash("LongFast", key)
+    for (label, portnum, payload, to, frm, pid, hop_limit, hop_start,
+         relay) in RX_CASES:
+        data = mesh_pb2.Data()
+        data.portnum = portnum
+        data.payload = payload
+        plaintext = data.SerializeToString()
+        ciphertext = aes_ctr(key, build_nonce(pid, frm), plaintext)
+        flags = (hop_limit & 0x07) | ((hop_start & 0x07) << 5)
+        frame = build_header(to, frm, pid, flags, chash, 0, relay) + ciphertext
+        assert len(frame) <= 184, "an RX vector must fit one phone read"
+
+        p = "RXVEC_%s_" % label
+        out.write("/* over-the-air frame: %s */\n" % label.lower())
+        out.write("#define %sPACKET_ID 0x%08xu\n" % (p, pid))
+        out.write("#define %sFROM_NODE 0x%08xu\n" % (p, frm))
+        out.write("#define %sTO_NODE 0x%08xu\n" % (p, to))
+        out.write("#define %sHOP_LIMIT %d\n" % (p, hop_limit))
+        out.write("#define %sHOP_START %d\n" % (p, hop_start))
+        out.write("#define %sCHANNEL_HASH 0x%02xu\n" % (p, chash))
+        out.write("#define %sPORTNUM %d\n" % (p, portnum))
+        out.write(c_bytes(p + "PAYLOAD", payload))
+        out.write("#define %sPAYLOAD_LEN %d\n" % (p, len(payload)))
+        out.write(c_bytes(p + "FRAME", frame))
+        out.write("#define %sFRAME_LEN %d\n\n" % (p, len(frame)))
+
+
 def build_case(case):
     """Compute every derived value for one case."""
     (label, text, to, frm, pid, hop_limit, hop_start, psk_index, chan_name) = case
@@ -128,6 +187,87 @@ def build_case(case):
         "hop_start": hop_start,
         "psk_index": psk_index,
     }
+
+
+def pkc_nonce(packet_id: int, from_node: int, extra_nonce: int) -> bytes:
+    """CryptoEngine::initNonce with an extra nonce, cut to CCM's 13 bytes.
+
+    16 bytes zeroed, the 64 bit packet id at 0, the from node at 8, then the
+    extra nonce written over bytes 4 to 7 when it is non-zero. aes_ccm_ae uses
+    the first 15 - L = 13 bytes (aes-ccm.cpp:60, L = 2).
+    """
+    nonce = bytearray(16)
+    nonce[0:8] = struct.pack("<Q", packet_id)
+    nonce[8:12] = struct.pack("<I", from_node)
+    if extra_nonce:
+        nonce[4:8] = struct.pack("<I", extra_nonce)
+    return bytes(nonce[:13])
+
+
+def x25519_keypair(seed: bytes):
+    """A fixed keypair: the private key is SHA-256 of a label."""
+    priv = hashlib.sha256(seed).digest()
+    key = X25519PrivateKey.from_private_bytes(priv)
+    pub = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    return key, priv, pub
+
+
+def write_ccm_vector(out):
+    """A plain AES-256-CCM vector, 13 byte nonce, 8 byte tag, 8 bytes of AD.
+
+    40 bytes of plaintext, so the last block is partial.
+    """
+    key = bytes(range(0x40, 0x60))
+    nonce = bytes(range(0x10, 0x1d))
+    aad = struct.pack("<II", 0x11223344, 0x55667788)
+    plaintext = bytes(range(40))
+    sealed = AESCCM(key, tag_length=8).encrypt(nonce, plaintext, aad)
+    out.write("/* AES-256-CCM, tag 8, nonce 13, from cryptography's AESCCM */\n")
+    out.write(c_bytes("CCM_KEY", key))
+    out.write(c_bytes("CCM_NONCE", nonce))
+    out.write(c_bytes("CCM_AAD", aad))
+    out.write("#define CCM_AAD_LEN %d\n" % len(aad))
+    out.write(c_bytes("CCM_PLAINTEXT", plaintext))
+    out.write("#define CCM_PLAINTEXT_LEN %d\n" % len(plaintext))
+    out.write(c_bytes("CCM_CIPHERTEXT", sealed[:-8]))
+    out.write(c_bytes("CCM_TAG", sealed[-8:]))
+    out.write("#define CCM_TAG_LEN 8\n\n")
+
+
+def write_pkc_vector(out):
+    """A Meshtastic direct message from Alice to Bob.
+
+    CryptoEngine::encryptCurve25519 (CryptoEngine.cpp:223-251): key is
+    SHA-256 of the X25519 secret, AES-256-CCM with an 8 byte tag and no AD,
+    and the payload is ciphertext, tag, then the 4 byte extra nonce.
+    """
+    alice, alice_priv, alice_pub = x25519_keypair(b"meshtastic-flipper pkc alice")
+    bob, bob_priv, bob_pub = x25519_keypair(b"meshtastic-flipper pkc bob")
+    secret = alice.exchange(bob.public_key())
+    assert secret == bob.exchange(alice.public_key())
+    key = hashlib.sha256(secret).digest()
+
+    frm, to, pid, extra = 0x11223344, 0x55667788, 0x0A0B0C0D, 0xA1B2C3D4
+    nonce = pkc_nonce(pid, frm, extra)
+    plaintext = build_data("hello bob, this is a direct message")
+    sealed = AESCCM(key, tag_length=8).encrypt(nonce, plaintext, None)
+    payload = sealed + struct.pack("<I", extra)
+
+    out.write("/* PKC direct message, Alice to Bob */\n")
+    out.write(c_bytes("PKC_ALICE_PRIV", alice_priv))
+    out.write(c_bytes("PKC_ALICE_PUB", alice_pub))
+    out.write(c_bytes("PKC_BOB_PRIV", bob_priv))
+    out.write(c_bytes("PKC_BOB_PUB", bob_pub))
+    out.write(c_bytes("PKC_SHARED_KEY", key))
+    out.write("#define PKC_FROM_NODE 0x%08xu\n" % frm)
+    out.write("#define PKC_TO_NODE 0x%08xu\n" % to)
+    out.write("#define PKC_PACKET_ID 0x%08xu\n" % pid)
+    out.write("#define PKC_EXTRA_NONCE 0x%08xu\n" % extra)
+    out.write(c_bytes("PKC_NONCE", nonce))
+    out.write(c_bytes("PKC_PLAINTEXT", plaintext))
+    out.write("#define PKC_PLAINTEXT_LEN %d\n" % len(plaintext))
+    out.write(c_bytes("PKC_PAYLOAD", payload))
+    out.write("#define PKC_PAYLOAD_LEN %d\n\n" % len(payload))
 
 
 def main():
@@ -182,6 +322,9 @@ def main():
         out.write(c_bytes(p + "TEXT", raw))
         out.write("#define %sTEXT_LEN %d\n\n" % (p, len(raw)))
 
+    write_rx_cases(out)
+    write_ccm_vector(out)
+    write_pkc_vector(out)
     out.write("#endif\n")
 
 

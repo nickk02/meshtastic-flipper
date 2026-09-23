@@ -2,10 +2,11 @@
 
 /* How many times each stage two message is queued. See the comment where it
  * is used. */
-#define STAGE_TWO_REPEATS 4
+#define STAGE_TWO_REPEATS HANDSHAKE_STAGE_TWO_REPEATS
 
-/* config.proto, Config.lora. */
-#define CONFIG_VARIANT_LORA 6
+/* config.proto, Config.device and Config.lora. */
+#define CONFIG_VARIANT_DEVICE 1
+#define CONFIG_VARIANT_LORA   6
 
 #include <string.h>
 
@@ -22,6 +23,11 @@ void handshake_init(Handshake* h, const MeshConfig* config) {
         phone_identity_from_config(config, &h->identity);
     }
     h->stage = HandshakeIdle;
+}
+
+void handshake_set_roster(Handshake* h, const NodeRoster* roster) {
+    if(h == NULL) return;
+    h->roster = roster;
 }
 
 void handshake_set_session_passkey(Handshake* h, const uint8_t* passkey) {
@@ -55,6 +61,7 @@ bool handshake_handle_to_radio(
     size_t len,
     HandshakeReply* reply) {
     uint32_t nonce = 0;
+    uint32_t packet_id = 0;
     size_t written;
 
     if(h == NULL || reply == NULL) return false;
@@ -81,6 +88,42 @@ bool handshake_handle_to_radio(
          * caller uses the return to decide whether the message was understood,
          * and an unanswered admin message reads as a stalled device. */
         if(written == 0) return true;
+        return push(reply, written);
+    }
+
+    /* Any other packet from the phone, such as a text message, is accepted
+     * and acknowledged with a queueStatus carrying its id. That is how the
+     * firmware tells the phone a packet was taken: handleToRadioPacket hands
+     * it to MeshService::handleToRadio (PhoneAPI.cpp:1913), whose sendToMesh
+     * queues router->getQueueStatus() with mesh_packet_id = p->id
+     * (MeshService.cpp:394-399). This device has no mesh transmit path for it
+     * yet, so the answer reports only that the packet was taken. */
+    if(phone_decode_packet_id(data, len, &packet_id)) {
+        written = phone_encode_queue_status(
+            0,
+            HANDSHAKE_QUEUE_FREE_REPORT,
+            HANDSHAKE_QUEUE_MAXLEN_REPORT,
+            packet_id,
+            reply->messages[reply->count].data,
+            HANDSHAKE_MAX_MESSAGE);
+        return push(reply, written);
+    }
+
+    /* A heartbeat gets one queueStatus, PhoneAPI.cpp handleToRadio (the
+     * heartbeat case sets heartbeatReceived) and getFromRadio (which sends
+     * the queueStatus before anything else). Nonce 1 is the firmware's
+     * "nodeinfo ping", answered with a mesh broadcast rather than a reply to
+     * the phone, so it gets nothing here. The stage is left alone: a
+     * heartbeat is not part of the handshake. */
+    if(phone_decode_heartbeat(data, len, &nonce)) {
+        if(nonce == 1) return true;
+        written = phone_encode_queue_status(
+            0,
+            HANDSHAKE_QUEUE_FREE_REPORT,
+            HANDSHAKE_QUEUE_MAXLEN_REPORT,
+            0,
+            reply->messages[reply->count].data,
+            HANDSHAKE_MAX_MESSAGE);
         return push(reply, written);
     }
 
@@ -128,12 +171,17 @@ bool handshake_handle_to_radio(
             if(!push(reply, written)) return false;
         }
 
-        /* Every Config variant, in field order. LoRa is field 6 and carries
-         * real settings; the rest are empty, meaning all defaults, which is the
-         * truthful answer for a device that does not implement them. Skipping
-         * them is what made the client abandon stage one and reconnect. */
+        /* Every Config variant, in field order. Device is field 1 and carries
+         * a tzdef, so the iOS app does not write one back. LoRa is field 6 and
+         * carries real settings; the rest are empty, meaning all defaults,
+         * which is the truthful answer for a device that does not implement
+         * them. Skipping them is what made the client abandon stage one and
+         * reconnect. */
         for(uint32_t variant = 1; variant <= PHONE_CONFIG_VARIANTS; variant++) {
-            if(variant == CONFIG_VARIANT_LORA) {
+            if(variant == CONFIG_VARIANT_DEVICE) {
+                written = phone_encode_device_config(
+                    reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            } else if(variant == CONFIG_VARIANT_LORA) {
                 written = phone_encode_lora_config(
                     h->config.lora.channel_num,
                     reply->messages[reply->count].data,
@@ -160,27 +208,62 @@ bool handshake_handle_to_radio(
     }
 
     if(nonce == PHONE_NONCE_NODE_INFO) {
-        /* Each message is queued STAGE_TWO_REPEATS times, not once.
+        /* Each message is queued once. STAGE_TWO_REPEATS is 1.
          *
-         * A FAP cannot detect when a phone actually reads a characteristic, so
-         * the drain publishes each queued message for one interval and then
-         * moves on regardless of whether anyone saw it. Once the queue is
-         * empty the timer stops and the value freezes on empty. For a large
-         * batch that is a survivable risk, since a slow reader still has many
-         * messages' worth of window to catch up in. For this two message
-         * batch it was not: the whole thing, including config_complete_id,
-         * the only message that ends the stage, was visible for well under a
-         * second and then gone for good. A device-side log confirmed 0
-         * refused every time, meaning the device believed it had sent
-         * everything while the phone's own UI stayed on "Retrieving nodes"
-         * and then dropped, every cycle, on real hardware.
+         * It was 4, on the theory that a single copy of this two message
+         * batch was visible for well under a second and then gone. It is
+         * not. The drain restates each frame for a full DRAIN_INTERVAL_MS
+         * (350ms), and the iOS client (Meshtastic-Apple v2.7.21) reads in a
+         * tight loop with no delay between reads (BLEConnection.swift
+         * drainPendingPackets, a repeat of read() that only breaks on an
+         * empty value). At the 88ms per read that test/host/ios_client.h
+         * models, every published frame is already read about four times;
+         * even at the 140-150ms per message timed on hardware (see
+         * DRAIN_INTERVAL_MS in meshtastic_service.c) it is read twice.
          *
-         * Repeating each message trades a slightly longer stage two for many
-         * independent chances to be read, rather than exactly one. */
+         * Repeats multiplied that, and each read is a full handler call:
+         *
+         * - handleNodeInfo bumps .retrievingDatabase(nodeCount) on every
+         *   NodeInfo it sees (AccessoryManager+FromRadio.swift:330-333), with
+         *   no check for a node it has already counted. Four copies read
+         *   four times each is why the phone showed "16 nodes" for this one
+         *   node. The host model in test/host/ios_client.h reproduces
+         *   exactly 16.
+         * - Every config_complete_id 69421 runs the NONCE_ONLY_DB branch of
+         *   processFromRadio (AccessoryManager.swift:1165-1190), which
+         *   flushes the deferred saves and batch saves the context. Four
+         *   copies read four times each ran that save 16 times per connect
+         *   in the same model.
+         *
+         * Duplicate reads of the single copy remain, since that is the
+         * transport, but they no longer multiply. */
         for(int i = 0; i < STAGE_TWO_REPEATS; i++) {
             written = phone_encode_node_info(
                 &h->identity, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
             if(!push(reply, written)) return false;
+        }
+
+        /* STATE_SEND_OTHER_NODEINFOS in PhoneAPI.cpp: after the own NodeInfo,
+         * one NodeInfo per node in the database, then config_complete. Only
+         * under 69421 here; the firmware skips this state for 69420, and so
+         * does stage one above. Each is sent once rather than repeated: the
+         * repeats exist to widen a two message batch, and a batch carrying
+         * heard nodes is already longer. Index 0 is the most recently heard,
+         * so the cap drops the stalest. A node that fails to encode is skipped
+         * rather than ending the stage, since config_complete must still go. */
+        size_t others = 0;
+        size_t heard = h->roster ? node_roster_count(h->roster) : 0;
+        for(size_t i = 0; i < heard && others < HANDSHAKE_MAX_OTHER_NODES; i++) {
+            const MeshNode* node = node_roster_get(h->roster, i);
+            if(node == NULL || node->node_num == 0) continue;
+            if(node->node_num == h->identity.node_num) continue;
+            /* last_heard 0: the roster only has a tick, and the phone fills
+             * in its own clock for 0 (MeshPackets.swift nodeInfoPacket). */
+            written = phone_encode_other_node_info(
+                node, 0, reply->messages[reply->count].data, HANDSHAKE_MAX_MESSAGE);
+            if(written == 0) continue;
+            if(!push(reply, written)) return false;
+            others++;
         }
 
         for(int i = 0; i < STAGE_TWO_REPEATS; i++) {

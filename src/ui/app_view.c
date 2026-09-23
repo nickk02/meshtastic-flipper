@@ -337,16 +337,31 @@ static void draw_phone(Canvas* canvas, MeshApp* app) {
         (unsigned long)st.fail_num);
     canvas_draw_str(canvas, 2, BODY_TOP, line);
 
-    snprintf(line, sizeof(line), "Stage:%s N:%lu", stage, (unsigned long)st.last_nonce);
-    canvas_draw_str(canvas, 2, BODY_TOP + ROW_H, line);
-
+    /* Ov is ToRadio writes dropped as too long for the buffer. */
     snprintf(
         line,
         sizeof(line),
-        "Q:%lu Dr:%lu Now:%lu",
+        "Stage:%s N:%lu Ov:%lu",
+        stage,
+        (unsigned long)st.last_nonce,
+        (unsigned long)st.write_oversize);
+    canvas_draw_str(canvas, 2, BODY_TOP + ROW_H, line);
+
+    /* X is vendor events the GATT handler rejected on event code alone. It
+     * sits right-aligned in the gap after "Stage:nodes N:69420", which leaves
+     * room for four digits. */
+    snprintf(line, sizeof(line), "X:%lu", (unsigned long)st.wrong_ecode);
+    canvas_draw_str_aligned(canvas, SCREEN_W - 2, BODY_TOP + ROW_H, AlignRight, AlignBottom, line);
+
+    /* Rf is frames refused because the queue was full. */
+    snprintf(
+        line,
+        sizeof(line),
+        "Q:%lu Dr:%lu Now:%lu Rf:%lu",
         (unsigned long)st.queued,
         (unsigned long)st.drained,
-        (unsigned long)st.pending);
+        (unsigned long)st.pending,
+        (unsigned long)st.refused);
     canvas_draw_str(canvas, 2, BODY_TOP + 2 * ROW_H, line);
 
     /* Handles the stack gave the three characteristics. A zero for R or N

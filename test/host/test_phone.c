@@ -302,6 +302,39 @@ TEST(test_packet_is_wrapped_in_field_2) {
     ASSERT_EQ_MEM(sub, payload, sizeof(payload));
 }
 
+/* Config.device */
+
+TEST(test_device_config_carries_tzdef) {
+    /* An empty tzdef is what makes the iOS app write set_config with the
+     * phone's timezone on every read of this variant. */
+    uint8_t buf[64];
+    const uint8_t* config = NULL;
+    size_t config_len = 0;
+    const uint8_t* device = NULL;
+    size_t device_len = 0;
+    const uint8_t* tz = NULL;
+    size_t tz_len = 0;
+
+    size_t len = phone_encode_device_config(buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    /* FromRadio.config is field 5. */
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_CONFIG, NULL, &config, &config_len));
+    /* Config.device is field 1. */
+    ASSERT_TRUE(find_field(config, config_len, 1, NULL, &device, &device_len));
+    /* DeviceConfig.tzdef is field 11, a POSIX TZ string. */
+    ASSERT_TRUE(find_field(device, device_len, 11, NULL, &tz, &tz_len));
+    ASSERT_EQ_INT(tz_len, 4);
+    ASSERT_EQ_MEM(tz, "UTC0", 4);
+    /* Nothing else in DeviceConfig: tag, length, four bytes. */
+    ASSERT_EQ_INT(device_len, 6);
+}
+
+TEST(test_device_config_rejects_small_buffer) {
+    uint8_t buf[4];
+    ASSERT_EQ_INT(phone_encode_device_config(buf, sizeof(buf)), 0);
+    ASSERT_EQ_INT(phone_encode_device_config(NULL, 64), 0);
+}
+
 /* ToRadio decode */
 
 TEST(test_decode_want_config_id) {
@@ -362,6 +395,312 @@ TEST(test_decode_round_trips_with_encoder) {
     ASSERT_EQ_INT(nonce, 0);
 }
 
+/* queueStatus, FromRadio field 11 */
+
+TEST(test_queue_status_is_field_11_with_all_subfields) {
+    uint8_t buf[32];
+    const uint8_t* qs = NULL;
+    size_t qs_len = 0;
+    uint64_t value = 0;
+
+    size_t len = phone_encode_queue_status(0, 16, 16, 0x01020304u, buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    /* Tag byte: field 11, wire type 2. */
+    ASSERT_EQ_INT(buf[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_QUEUE_STATUS, NULL, &qs, &qs_len));
+
+    /* res 0 is the proto3 default and is left out. */
+    ASSERT_TRUE(!find_field(qs, qs_len, 1, &value, NULL, NULL));
+    ASSERT_TRUE(find_field(qs, qs_len, 2, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 16);
+    ASSERT_TRUE(find_field(qs, qs_len, 3, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 16);
+    ASSERT_TRUE(find_field(qs, qs_len, 4, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 0x01020304u);
+}
+
+TEST(test_queue_status_zeros_still_carry_free_and_maxlen) {
+    /* An all-zero answer must still be a QueueStatus with fields in it, not
+       an empty submessage. */
+    uint8_t buf[16];
+    const uint8_t* qs = NULL;
+    size_t qs_len = 0;
+    uint64_t value = 99;
+
+    size_t len = phone_encode_queue_status(0, 0, 0, 0, buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_QUEUE_STATUS, NULL, &qs, &qs_len));
+    ASSERT_EQ_INT(qs_len, 4);
+    ASSERT_TRUE(find_field(qs, qs_len, 2, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 0);
+    value = 99;
+    ASSERT_TRUE(find_field(qs, qs_len, 3, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 0);
+    ASSERT_TRUE(!find_field(qs, qs_len, 1, &value, NULL, NULL));
+    ASSERT_TRUE(!find_field(qs, qs_len, 4, &value, NULL, NULL));
+}
+
+TEST(test_queue_status_negative_res_is_ten_byte_varint) {
+    /* int32 -1 is sign extended to 64 bits on the wire: tag, then ten bytes,
+       nine of 0xff and a final 0x01. Five bytes would decode as 4294967295. */
+    uint8_t buf[32];
+    const uint8_t* qs = NULL;
+    size_t qs_len = 0;
+    uint64_t value = 0;
+    const uint8_t expected_res[] = {
+        0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01};
+
+    size_t len = phone_encode_queue_status(-1, 16, 16, 0, buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(find_field(buf, len, FROMRADIO_FIELD_QUEUE_STATUS, NULL, &qs, &qs_len));
+    ASSERT_EQ_INT(qs_len, sizeof(expected_res) + 4);
+    ASSERT_EQ_MEM(qs, expected_res, sizeof(expected_res));
+
+    ASSERT_TRUE(find_field(qs, qs_len, 1, &value, NULL, NULL));
+    ASSERT_EQ_INT((int32_t)(int64_t)value, -1);
+    ASSERT_TRUE(find_field(qs, qs_len, 2, &value, NULL, NULL));
+    ASSERT_EQ_INT(value, 16);
+}
+
+TEST(test_queue_status_rejects_small_buffer) {
+    uint8_t buf[8];
+    ASSERT_EQ_INT(phone_encode_queue_status(-1, 16, 16, 0, buf, sizeof(buf)), 0);
+    ASSERT_EQ_INT(phone_encode_queue_status(0, 16, 16, 0, NULL, 32), 0);
+}
+
+/* ToRadio heartbeat decode */
+
+static size_t build_heartbeat(uint8_t* buf, size_t cap, bool with_nonce, uint32_t nonce) {
+    uint8_t hb[8];
+    PbWriter w;
+    size_t hb_len = 0;
+    if(with_nonce) {
+        pb_writer_init(&w, hb, sizeof(hb));
+        pb_write_varint_field_always(&w, 1, nonce);
+        hb_len = pb_writer_len(&w);
+    }
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_HEARTBEAT, hb, hb_len);
+    return pb_writer_len(&w);
+}
+
+TEST(test_decode_heartbeat_nonce) {
+    uint8_t buf[16];
+    uint32_t nonce = 0;
+    size_t len = build_heartbeat(buf, sizeof(buf), true, 0x89abcdefu);
+    ASSERT_TRUE(phone_decode_heartbeat(buf, len, &nonce));
+    ASSERT_EQ_INT(nonce, 0x89abcdefu);
+
+    len = build_heartbeat(buf, sizeof(buf), true, 1);
+    ASSERT_TRUE(phone_decode_heartbeat(buf, len, &nonce));
+    ASSERT_EQ_INT(nonce, 1);
+}
+
+TEST(test_decode_heartbeat_without_nonce_is_zero) {
+    uint8_t buf[16];
+    uint32_t nonce = 77;
+    size_t len = build_heartbeat(buf, sizeof(buf), false, 0);
+    ASSERT_EQ_INT(len, 2);
+    ASSERT_TRUE(phone_decode_heartbeat(buf, len, &nonce));
+    ASSERT_EQ_INT(nonce, 0);
+}
+
+TEST(test_decode_heartbeat_rejects_others_and_malformed) {
+    uint8_t buf[16];
+    uint32_t nonce = 0;
+    PbWriter w;
+    const uint8_t bad_inner[] = {0x3a, 0x02, 0x08, 0x80}; /* nonce varint runs off */
+    const uint8_t bad_outer[] = {0x3a, 0x05, 0x08, 0x01}; /* length past the end */
+    const uint8_t varint_hb[] = {0x38, 0x01}; /* field 7 as a varint */
+
+    pb_writer_init(&w, buf, sizeof(buf));
+    pb_write_varint_field_always(&w, TORADIO_FIELD_WANT_CONFIG_ID, PHONE_NONCE_CONFIG);
+    ASSERT_TRUE(!phone_decode_heartbeat(buf, pb_writer_len(&w), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(bad_inner, sizeof(bad_inner), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(bad_outer, sizeof(bad_outer), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(varint_hb, sizeof(varint_hb), &nonce));
+    ASSERT_TRUE(!phone_decode_heartbeat(NULL, 0, &nonce));
+}
+
+/* ToRadio.packet id decode */
+
+static size_t build_text_packet(uint8_t* buf, size_t cap, bool fixed32_id, uint32_t id) {
+    uint8_t data[32];
+    uint8_t packet[64];
+    PbWriter w;
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, 1, 1); /* portnum TEXT_MESSAGE_APP */
+    pb_write_string_field(&w, 2, "hi");
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, 2, 0xFFFFFFFFu); /* to broadcast */
+    pb_write_submessage(&w, 4, data, data_len);
+    if(fixed32_id) {
+        pb_write_fixed32_field_always(&w, 6, id);
+    } else {
+        pb_write_varint_field_always(&w, 6, id);
+    }
+    size_t packet_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_PACKET, packet, packet_len);
+    return pb_writer_ok(&w) ? pb_writer_len(&w) : 0;
+}
+
+TEST(test_decode_packet_id_reads_fixed32) {
+    uint8_t buf[96];
+    uint32_t id = 0;
+    size_t len = build_text_packet(buf, sizeof(buf), true, 0x01020304u);
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(phone_decode_packet_id(buf, len, &id));
+    ASSERT_EQ_INT(id, 0x01020304u);
+}
+
+TEST(test_decode_packet_id_rejects_varint_id) {
+    /* MeshPacket.id is fixed32. A varint in field 6 is not an id. */
+    uint8_t buf[96];
+    uint32_t id = 0;
+    size_t len = build_text_packet(buf, sizeof(buf), false, 0x01020304u);
+    ASSERT_TRUE(len > 0);
+    ASSERT_TRUE(!phone_decode_packet_id(buf, len, &id));
+}
+
+TEST(test_decode_packet_id_rejects_malformed_and_absent) {
+    uint8_t buf[96];
+    uint32_t id = 0;
+    PbWriter w;
+    /* ToRadio.packet { id: fixed32 cut short } */
+    const uint8_t cut_id[] = {0x0a, 0x03, 0x35, 0x04, 0x03};
+    /* ToRadio.packet whose length runs past the end. */
+    const uint8_t bad_len[] = {0x0a, 0x09, 0x35, 0x04, 0x03, 0x02, 0x01};
+    /* ToRadio.packet { from } with no id. */
+    const uint8_t no_id[] = {0x0a, 0x05, 0x0d, 0x01, 0x02, 0x03, 0x04};
+
+    ASSERT_TRUE(!phone_decode_packet_id(cut_id, sizeof(cut_id), &id));
+    ASSERT_TRUE(!phone_decode_packet_id(bad_len, sizeof(bad_len), &id));
+    ASSERT_TRUE(!phone_decode_packet_id(no_id, sizeof(no_id), &id));
+
+    pb_writer_init(&w, buf, sizeof(buf));
+    pb_write_varint_field_always(&w, TORADIO_FIELD_WANT_CONFIG_ID, PHONE_NONCE_CONFIG);
+    ASSERT_TRUE(!phone_decode_packet_id(buf, pb_writer_len(&w), &id));
+    ASSERT_TRUE(!phone_decode_packet_id(NULL, 4, &id));
+}
+
+#include "src/ble/meshtastic_handshake.h"
+/* Frame size cap */
+
+/* The largest identity a PhoneIdentity can hold: every string at its array
+ * size less the terminator, and every integer at its widest varint. Filled
+ * directly rather than through phone_identity_init, so the bound tested is
+ * the struct's and not whatever the init path happens to produce. */
+static PhoneIdentity maximal_identity(void) {
+    PhoneIdentity id;
+    memset(&id, 0, sizeof(id));
+    id.node_num = 0xFFFFFFFF;
+    id.hw_model = 0xFFFFFFFF;
+    memset(id.id, 'I', sizeof(id.id) - 1);
+    memset(id.long_name, 'L', sizeof(id.long_name) - 1);
+    memset(id.short_name, 'S', sizeof(id.short_name) - 1);
+    return id;
+}
+
+static size_t frame_max_seen = 0;
+
+/* Built in a buffer larger than the cap, so a frame over it is measured
+ * rather than refused by out_len. */
+static void check_fits(const char* what, size_t len) {
+    ASSERT_TRUE(len > 0);
+    if(len > PHONE_FRAME_MAX) {
+        printf("  %s: %u bytes, over %d\n", what, (unsigned)len, PHONE_FRAME_MAX);
+    }
+    ASSERT_TRUE(len <= PHONE_FRAME_MAX);
+    if(len > frame_max_seen) frame_max_seen = len;
+}
+
+TEST(test_every_frame_fits_the_phone_read_limit) {
+    PhoneIdentity id = maximal_identity();
+    uint8_t out[256];
+    uint8_t passkey[PHONE_SESSION_PASSKEY_LEN];
+    /* The longest channel name the config record holds. */
+    char channel[MESH_CONFIG_CHANNEL_NAME_MAX];
+    size_t len;
+
+    memset(passkey, 0xFF, sizeof(passkey));
+    memset(channel, 'C', sizeof(channel) - 1);
+    channel[sizeof(channel) - 1] = '\0';
+    frame_max_seen = 0;
+
+    /* Stage one, in handshake order. */
+    len = phone_encode_my_node_info(&id, out, sizeof(out));
+    printf("  my_info %u", (unsigned)len);
+    check_fits("my_info", len);
+    check_fits("deviceuiConfig", phone_encode_device_ui(out, sizeof(out)));
+    len = phone_encode_node_info(&id, out, sizeof(out));
+    printf(", node_info %u", (unsigned)len);
+    check_fits("node_info", len);
+    len = phone_encode_device_metadata(&id, out, sizeof(out));
+    printf(", metadata %u", (unsigned)len);
+    check_fits("metadata", len);
+    len = phone_encode_primary_channel(channel, 0xFF, out, sizeof(out));
+    printf(", primary channel %u", (unsigned)len);
+    check_fits("primary channel", len);
+    for(uint32_t slot = 1; slot < PHONE_CHANNEL_SLOTS; slot++) {
+        check_fits("empty channel", phone_encode_empty_channel(slot, out, sizeof(out)));
+    }
+    check_fits("empty channel", phone_encode_empty_channel(0xFFFFFFFF, out, sizeof(out)));
+    len = phone_encode_lora_config(0xFFFFFFFF, out, sizeof(out));
+    printf(", lora %u\n", (unsigned)len);
+    check_fits("lora config", len);
+    for(uint32_t v = 1; v <= PHONE_CONFIG_VARIANTS; v++) {
+        check_fits("config variant", phone_encode_config_variant(v, NULL, 0, out, sizeof(out)));
+    }
+    for(uint32_t v = 1; v <= PHONE_MODULECONFIG_VARIANTS; v++) {
+        check_fits(
+            "module config variant", phone_encode_moduleconfig_variant(v, out, sizeof(out)));
+    }
+    check_fits("config_complete", phone_encode_config_complete(0xFFFFFFFF, out, sizeof(out)));
+
+    /* Admin replies, with addressing at its widest. */
+    const uint32_t fields[] = {
+        ADMIN_GET_OWNER_REQUEST,
+        ADMIN_GET_CANNED_REQUEST,
+        ADMIN_GET_RINGTONE_REQUEST,
+        ADMIN_SET_CONFIG};
+    for(size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        PhoneAdminRequest req = {
+            .packet_id = 0xFFFFFFFF,
+            .from = 0xFFFFFFFF,
+            .admin_field = fields[i],
+            .want_response = true};
+        len = phone_encode_admin_reply(&id, &req, passkey, out, sizeof(out));
+        printf("  admin reply to field %u: %u bytes\n", (unsigned)fields[i], (unsigned)len);
+        check_fits("admin reply", len);
+    }
+
+    printf(
+        "  largest frame with maximal fields: %u of %d\n",
+        (unsigned)frame_max_seen,
+        PHONE_FRAME_MAX);
+}
+
+/* The one encoder with no fixed bound is phone_encode_packet, which wraps
+ * whatever it is given. Past the cap it must refuse in a cap-sized buffer, not
+ * truncate, so an oversize frame never reaches the queue as a short one. */
+TEST(test_packet_over_the_read_limit_is_refused_not_truncated) {
+    uint8_t payload[190];
+    uint8_t out[PHONE_FRAME_MAX];
+    uint8_t wide[256];
+
+    memset(payload, 'x', sizeof(payload));
+    /* Tag, two byte length, 181 bytes: exactly the cap. */
+    ASSERT_EQ_INT(phone_encode_packet(payload, 181, out, sizeof(out)), PHONE_FRAME_MAX);
+    ASSERT_EQ_INT(phone_encode_packet(payload, 182, out, sizeof(out)), 0);
+    /* Given the room, it builds the frame, and it is over the cap. */
+    ASSERT_EQ_INT(phone_encode_packet(payload, sizeof(payload), wide, sizeof(wide)), 193);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_writer_omits_zero_varint);
 RUN_TEST(test_writer_always_variant_writes_zero);
@@ -379,9 +718,23 @@ RUN_TEST(test_config_complete_uses_field_7);
 RUN_TEST(test_both_handshake_nonces_encode);
 RUN_TEST(test_config_complete_with_zero_nonce_still_writes);
 RUN_TEST(test_packet_is_wrapped_in_field_2);
+RUN_TEST(test_device_config_carries_tzdef);
+RUN_TEST(test_device_config_rejects_small_buffer);
 RUN_TEST(test_decode_want_config_id);
 RUN_TEST(test_decode_skips_other_fields);
 RUN_TEST(test_decode_reports_absent_want_config_id);
 RUN_TEST(test_decode_rejects_malformed);
 RUN_TEST(test_decode_round_trips_with_encoder);
+RUN_TEST(test_queue_status_is_field_11_with_all_subfields);
+RUN_TEST(test_queue_status_zeros_still_carry_free_and_maxlen);
+RUN_TEST(test_queue_status_negative_res_is_ten_byte_varint);
+RUN_TEST(test_queue_status_rejects_small_buffer);
+RUN_TEST(test_decode_heartbeat_nonce);
+RUN_TEST(test_decode_heartbeat_without_nonce_is_zero);
+RUN_TEST(test_decode_heartbeat_rejects_others_and_malformed);
+RUN_TEST(test_decode_packet_id_reads_fixed32);
+RUN_TEST(test_decode_packet_id_rejects_varint_id);
+RUN_TEST(test_decode_packet_id_rejects_malformed_and_absent);
+RUN_TEST(test_every_frame_fits_the_phone_read_limit);
+RUN_TEST(test_packet_over_the_read_limit_is_refused_not_truncated);
 TEST_MAIN_END()
