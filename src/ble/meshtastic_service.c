@@ -10,6 +10,7 @@
 #include <furi_hal_version.h>
 #include <string.h>
 
+#include "src/ble/meshtastic_gatt_event.h"
 #include "src/ble/meshtastic_handshake.h"
 
 #define TAG "MeshBLE"
@@ -126,6 +127,7 @@ struct MeshtasticBleService {
     uint32_t stat_fail_num;
     uint32_t stat_events;
     uint32_t stat_vendor_events;
+    uint32_t stat_wrong_ecode;
     uint16_t stat_last_attr_handle;
     /* Frames meshtastic_ble_service_queue turned away because the queue was
      * full, and how many in a row since it last accepted one. The run length
@@ -603,37 +605,11 @@ static void handle_to_radio(MeshtasticBleService* service, const uint8_t* data, 
 }
 
 /* The BLE stack hands every GATT event to every registered handler. We only
- * want writes to our ToRadio characteristic.
- *
- * The SDK does not expose the stack's packet structs to applications. Its own
- * comment in event_dispatcher.h says so: "Using other types so not to leak all
- * the BLE stack headers". The three below are copied verbatim from the
- * STM32WB BLE stack, ble_legacy.h, and must stay byte-compatible with it.
- *
- * ACI_GATT_ATTRIBUTE_MODIFIED_VSEVT_CODE is deliberately not used. It is not
- * in the FAP SDK and I could not obtain it from a citable source, so the
- * filter here is the event type plus an exact handle match instead. That is
- * looser than the firmware's own serial service, which checks the event code
- * as well. Adding that check is worthwhile hardening once the constant can be
- * confirmed against ble_events.h. Until then a stray vendor event would have
- * to carry our exact attribute handle at the right offset to get through, and
- * anything that does still has to survive the protobuf parser. */
-typedef struct __attribute__((packed)) {
-    uint8_t type;
-    uint8_t data[1];
-} MeshHciUartPacket;
-
-typedef struct __attribute__((packed)) {
-    uint8_t evt;
-    uint8_t plen;
-    uint8_t data[1];
-} MeshHciEventPacket;
-
-typedef struct __attribute__((packed)) {
-    uint16_t ecode;
-    uint8_t data[1];
-} MeshBlecoreEvent;
-
+ * want writes to our ToRadio characteristic, so the filter is the same three
+ * steps the firmware's own serial service takes, serial_service.c:81-91: a
+ * vendor event, whose event code is attribute-modified, on our value handle.
+ * The packet structs and the event code are in meshtastic_gatt_event.h, with
+ * their sources. */
 static BleEventAckStatus gatt_event_handler(void* event, void* context) {
     MeshtasticBleService* service = context;
 
@@ -649,7 +625,16 @@ static BleEventAckStatus gatt_event_handler(void* event, void* context) {
 
     service->stat_vendor_events++;
 
+    /* Only ACI_GATT_ATTRIBUTE_MODIFIED_EVENT carries the layout read below.
+     * Any other vendor event (an MTU exchange, a TX pool notice, a GAP
+     * event) has a different payload, and reading it as attribute-modified
+     * would compare our handle against whatever bytes happen to sit there. */
     MeshBlecoreEvent* blecore = (MeshBlecoreEvent*)packet->data;
+    if(blecore->ecode != MESH_ACI_GATT_ATTRIBUTE_MODIFIED_VSEVT_CODE) {
+        service->stat_wrong_ecode++;
+        return BleEventNotAck;
+    }
+
     aci_gatt_attribute_modified_event_rp0* modified =
         (aci_gatt_attribute_modified_event_rp0*)blecore->data;
     service->stat_last_attr_handle = modified->Attr_Handle;
@@ -834,6 +819,7 @@ void meshtastic_ble_service_stats(MeshtasticBleService* service, MeshBleStats* o
         snap->fail_num = service->stat_fail_num;
         snap->events = service->stat_events;
         snap->vendor_events = service->stat_vendor_events;
+        snap->wrong_ecode = service->stat_wrong_ecode;
         snap->last_attr_handle = service->stat_last_attr_handle;
         snap->refused = service->stat_refused;
         snap->to_radio_handle = (uint16_t)(service->to_radio.handle + 1);

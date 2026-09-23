@@ -83,6 +83,10 @@ typedef struct {
      * different problem from being called and rejecting the event. */
     uint32_t events;
     uint32_t vendor_events;
+    /* Vendor events that were not attribute-modified, so the handler rejected
+     * them before looking at the handle. Nonzero is normal: the stack sends
+     * other vendor events too. It says the event code filter is doing work. */
+    uint32_t wrong_ecode;
     uint16_t last_attr_handle; /* handle from the last attribute-modified event */
     uint16_t to_radio_handle; /* the handle we compare against */
 
