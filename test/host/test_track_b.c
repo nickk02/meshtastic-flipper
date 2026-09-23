@@ -231,7 +231,10 @@ TEST(test_stage_two_full_roster_fits_queue) {
     ASSERT_EQ_INT(c.queue_refused, 0);
     ASSERT_EQ_INT(c.decode_failures, 0);
     ASSERT_TRUE(c.db_gate_open);
-    ASSERT_EQ_INT(c.db_distinct_nodes, 1 + HANDSHAKE_MAX_OTHER_NODES);
+    /* Own node plus every roster node that fits the stage two cap. */
+    size_t others = NODE_ROSTER_CAPACITY < HANDSHAKE_MAX_OTHER_NODES ? NODE_ROSTER_CAPACITY :
+                                                                       HANDSHAKE_MAX_OTHER_NODES;
+    ASSERT_EQ_INT(c.db_distinct_nodes, 1 + others);
 }
 
 /* phone_encode_rx_packet */
