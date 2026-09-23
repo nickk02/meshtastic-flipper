@@ -553,7 +553,8 @@ static inline void ios_device_write(IosClient* c, const uint8_t* data, size_t le
     c->to_radio_writes++;
     if(c->transport == IosTransportPaced) ios_device_advance(c, c->now_ms);
 
-    /* handle_to_radio resets the queue on a fresh stage one request. */
+    /* handle_to_radio resets the queue on a fresh stage one request. The
+     * reply to the Step 2 heartbeat is discarded with everything else. */
     uint32_t nonce = 0;
     if(phone_decode_want_config_id(data, len, &nonce) && nonce == PHONE_NONCE_CONFIG) {
         c->q_tail = 0;

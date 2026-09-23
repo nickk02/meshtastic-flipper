@@ -113,7 +113,9 @@ TEST(test_stage_one_order_as_the_client_reads_it) {
     ios_client_init(&c, &cfg, IosTransportIdeal);
     ios_client_connect(&c);
 
-    /* my_info first, then the client has a device num. */
+    /* my_info first, then the client has a device num. The Step 2
+     * heartbeat's queueStatus is discarded by the stage one reset, so it is
+     * not read; the Step 4 one is. */
     ASSERT_EQ_INT(c.variant_trace[0], IOS_FR_MY_INFO);
     /* The node's own NodeInfo, carrying the name, precedes metadata and
      * every config frame, since handleConfig drops frames until it has one. */

@@ -37,6 +37,14 @@ typedef enum {
 #define HANDSHAKE_MAX_REPLIES 36
 #define HANDSHAKE_MAX_MESSAGE 192
 
+/* What a queueStatus from this device reports. A real node reports its
+ * radio's transmit queue, RadioLibInterface::getQueueStatus, whose depth is
+ * MAX_TX_QUEUE 16 (firmware RadioInterface.h:18); an idle one therefore says
+ * 16 free of 16. The handshake has no view of a transmit queue, so it reports
+ * that fixed capacity, all of it free, rather than invent a live count. */
+#define HANDSHAKE_QUEUE_FREE_REPORT   16
+#define HANDSHAKE_QUEUE_MAXLEN_REPORT 16
+
 typedef struct {
     uint8_t data[HANDSHAKE_MAX_MESSAGE];
     size_t len;
@@ -76,6 +84,10 @@ void handshake_set_session_passkey(Handshake* h, const uint8_t* passkey);
  * Fills reply with the FromRadio messages to queue, in order. Returns false
  * when the message carries no want_config_id or the nonce is unrecognized, in
  * which case reply is emptied and nothing should be sent.
+ *
+ * A heartbeat is answered with one queueStatus, as PhoneAPI.cpp does, unless
+ * its nonce is 1, which the firmware treats as a NodeInfo broadcast trigger
+ * and does not answer. Both return true: the heartbeat was understood.
  *
  * An unknown nonce is rejected rather than guessed at. Replying to a stage the
  * app did not ask for makes it discard the response and stall. */

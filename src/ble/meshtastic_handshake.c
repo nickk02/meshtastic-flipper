@@ -85,6 +85,24 @@ bool handshake_handle_to_radio(
         return push(reply, written);
     }
 
+    /* A heartbeat gets one queueStatus, PhoneAPI.cpp handleToRadio (the
+     * heartbeat case sets heartbeatReceived) and getFromRadio (which sends
+     * the queueStatus before anything else). Nonce 1 is the firmware's
+     * "nodeinfo ping", answered with a mesh broadcast rather than a reply to
+     * the phone, so it gets nothing here. The stage is left alone: a
+     * heartbeat is not part of the handshake. */
+    if(phone_decode_heartbeat(data, len, &nonce)) {
+        if(nonce == 1) return true;
+        written = phone_encode_queue_status(
+            0,
+            HANDSHAKE_QUEUE_FREE_REPORT,
+            HANDSHAKE_QUEUE_MAXLEN_REPORT,
+            0,
+            reply->messages[reply->count].data,
+            HANDSHAKE_MAX_MESSAGE);
+        return push(reply, written);
+    }
+
     if(!phone_decode_want_config_id(data, len, &nonce)) return false;
 
     if(nonce == PHONE_NONCE_CONFIG) {
