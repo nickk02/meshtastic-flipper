@@ -131,6 +131,7 @@
 #define IOS_LOG_LINE      128
 #define IOS_VARIANT_TRACE 512
 #define IOS_VERSION_MAX   48
+#define IOS_DB_NODES_MAX  64
 
 typedef enum {
     IosTransportIdeal,
@@ -201,6 +202,9 @@ typedef struct {
     char firmware_version[IOS_VERSION_MAX];
     bool in_database_stage; /* state == .retrievingDatabase */
     int node_count; /* .retrievingDatabase(nodeCount) */
+    /* Distinct node numbers among those, since the client counts repeats. */
+    int db_distinct_nodes;
+    uint32_t db_node_nums[IOS_DB_NODES_MAX];
     bool db_first_node_seen;
     bool db_gate_open;
     int stage; /* 0 idle, 1 config, 2 database, 3 connected */
@@ -785,7 +789,16 @@ static inline void ios_handle_node_info(IosClient* c, const uint8_t* m, size_t n
         }
         if(c->have_my_info && (uint32_t)num == c->my_node_num) c->have_long_name = true;
     }
-    if(c->in_database_stage) c->node_count++;
+    if(c->in_database_stage) {
+        c->node_count++;
+        bool seen = false;
+        for(int i = 0; i < c->db_distinct_nodes; i++) {
+            if(c->db_node_nums[i] == (uint32_t)num) seen = true;
+        }
+        if(!seen && c->db_distinct_nodes < IOS_DB_NODES_MAX) {
+            c->db_node_nums[c->db_distinct_nodes++] = (uint32_t)num;
+        }
+    }
 }
 
 static inline void ios_handle_metadata(IosClient* c, const uint8_t* m, size_t n) {
@@ -1159,6 +1172,7 @@ static inline void ios_client_disconnect(IosClient* c) {
     c->firmware_version[0] = 0;
     c->in_database_stage = false;
     c->node_count = 0;
+    c->db_distinct_nodes = 0;
     c->db_first_node_seen = false;
     c->db_gate_open = false;
     c->stage = 0;
@@ -1223,6 +1237,7 @@ static inline IosOutcome ios_client_connect(IosClient* c) {
     c->stage_started_ms[2] = c->now_ms;
     c->in_database_stage = true;
     c->node_count = 0;
+    c->db_distinct_nodes = 0;
     n = ios_build_want_config(buf, sizeof(buf), IOS_NONCE_DB);
     ios_device_write(c, buf, n);
     if(!ios_wait(
@@ -1333,11 +1348,12 @@ static inline void ios_client_report(const IosClient* c) {
         c->moduleconfig_dropped_no_name,
         c->nodeinfo_zero_num);
     printf(
-        "  completions: 69420 ignored %d, 69421 seen %d, unknown %d; stage2 node count %d\n",
+        "  completions: 69420 ignored %d, 69421 seen %d, unknown %d; stage2 node count %d (%d distinct)\n",
         c->config_complete_ignored,
         c->db_complete_count,
         c->config_complete_unknown,
-        c->node_count);
+        c->node_count,
+        c->db_distinct_nodes);
     printf(
         "  client sent: heartbeats %d, get_canned %d, get_ringtone %d, set_config(tzdef) %d, set_time %d\n",
         c->sent_heartbeats,

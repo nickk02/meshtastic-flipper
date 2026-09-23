@@ -6,7 +6,8 @@
  * messages for that stage, then config_complete_id carrying the same nonce.
  *
  *   Stage 1, nonce 69420: MyNodeInfo, then config_complete
- *   Stage 2, nonce 69421: our NodeInfo, then config_complete
+ *   Stage 2, nonce 69421: our NodeInfo, one NodeInfo per heard node, then
+ *                         config_complete
  *
  * Real firmware also sends config blocks, module config, channels, metadata and
  * a file manifest. The client does not require any of them. Its own test
@@ -37,6 +38,15 @@ typedef enum {
 #define HANDSHAKE_MAX_REPLIES 36
 #define HANDSHAKE_MAX_MESSAGE 192
 
+/* Stage two is the own NodeInfo and config_complete, each repeated (see
+ * STAGE_TWO_REPEATS), with one NodeInfo per heard node between them. Heard
+ * nodes are capped so the stage fits HANDSHAKE_MAX_REPLIES, which also keeps
+ * it below the service's 40 slot queue with room for the admin replies stage
+ * one leaves behind. With the roster full, the least recently heard nodes are
+ * the ones left out. */
+#define HANDSHAKE_STAGE_TWO_REPEATS 4
+#define HANDSHAKE_MAX_OTHER_NODES   (HANDSHAKE_MAX_REPLIES - 2 * HANDSHAKE_STAGE_TWO_REPEATS)
+
 typedef struct {
     uint8_t data[HANDSHAKE_MAX_MESSAGE];
     size_t len;
@@ -57,12 +67,23 @@ typedef struct {
     PhoneAdminRequest admin;
     PhoneIdentity identity;
     HandshakeStage stage;
+    /* Heard nodes for stage two. NULL means none. Borrowed, not owned. */
+    const NodeRoster* roster;
 } Handshake;
 
 /* The config record is copied, not referenced. The handshake runs on the BLE
  * worker thread and the record is edited from the UI thread, so sharing a
  * pointer would need a lock on every field read. */
 void handshake_init(Handshake* h, const MeshConfig* config);
+
+/* Nodes heard on the air, sent in stage two after this node's own NodeInfo.
+ *
+ * Held by pointer and read during handshake_handle_to_radio. The roster the
+ * app keeps is written by the radio thread under the app's mutex, and this
+ * runs on the BLE worker, so the caller must not hand over that live roster:
+ * the service passes a snapshot it copied under the app's mutex instead (see
+ * meshtastic_ble_service_set_roster). NULL sends no other nodes. */
+void handshake_set_roster(Handshake* h, const NodeRoster* roster);
 
 /* Seed the session passkey the admin exchange hands to the phone.
  *

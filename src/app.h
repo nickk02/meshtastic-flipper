@@ -59,6 +59,8 @@ typedef struct {
     RawFrame rx_frame;
     MeshDecoded rx_decoded;
     MeshEvent rx_event;
+    /* A received packet re-encoded as FromRadio.packet for the phone. */
+    uint8_t phone_frame[PHONE_READ_MAX];
 
     /* What this node is: identity, channel, LoRa settings. The single source
      * the BLE handshake, the UI and later the radio all read from. */
