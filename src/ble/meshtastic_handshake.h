@@ -42,8 +42,9 @@ typedef enum {
  * byte ATT opcode. BLEConnection.read() reads once, with no long read, and
  * drainPendingPackets disconnects on a frame that does not decode, which is
  * what a truncated frame is (Meshtastic-Apple v2.7.21, BLEConnection.swift:196
- * and :640). Nothing may queue a frame longer than this. */
-#define PHONE_FRAME_MAX 184
+ * and :640). Nothing may queue a frame longer than this. Same limit as
+ * PHONE_READ_MAX in phone_encode.h, which is where the number lives. */
+#define PHONE_FRAME_MAX PHONE_READ_MAX
 
 #define HANDSHAKE_MAX_MESSAGE PHONE_FRAME_MAX
 
