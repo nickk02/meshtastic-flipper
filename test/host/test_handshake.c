@@ -127,6 +127,16 @@ TEST(test_stage_one_follows_the_firmware_order) {
         ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_CONFIG);
     }
 
+    /* The first config variant is Config.device (field 1), and its body is not
+     * empty: it carries tzdef, so the iOS app has no reason to write one back.
+     * Bytes: FromRadio.config tag, length, Config.device tag, body length. */
+    ASSERT_TRUE(reply.messages[12].len > 4);
+    ASSERT_EQ_INT(reply.messages[12].data[2] >> 3, 1);
+    ASSERT_EQ_INT(reply.messages[12].data[2] & 0x07, 2);
+    ASSERT_TRUE(reply.messages[12].data[3] > 0);
+    ASSERT_TRUE(memmem_present(
+        reply.messages[12].data, reply.messages[12].len, (const uint8_t*)"UTC0", 4));
+
     for(size_t i = 22; i < 22 + PHONE_MODULECONFIG_VARIANTS; i++) {
         ASSERT_TRUE(reply.messages[i].len > 0);
         ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_MODULECONFIG);
@@ -156,21 +166,15 @@ TEST(test_stage_two_returns_node_info_then_config_complete) {
     size_t len = make_want_config(PHONE_NONCE_NODE_INFO, to_radio, sizeof(to_radio));
 
     ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
-    /* Each message repeats four times: this is not a single unreliable pass,
-     * since a device that cannot detect reads has no other way to give a slow
-     * reader more than one chance. */
-    ASSERT_EQ_INT(reply.count, 8);
-    for(size_t i = 0; i < 4; i++) {
-        ASSERT_EQ_INT(reply.messages[i].data[0] >> 3, FROMRADIO_FIELD_NODE_INFO);
-    }
-    for(size_t i = 4; i < 8; i++) {
-        ASSERT_TRUE(has_varint_field(
-            reply.messages[i].data,
-            reply.messages[i].len,
-            FROMRADIO_FIELD_CONFIG_COMPLETE_ID,
-            &value));
-        ASSERT_EQ_INT(value, PHONE_NONCE_NODE_INFO);
-    }
+    /* One copy of each, like the firmware. The drain already restates each
+     * frame for a whole interval and the iOS client reads it several times
+     * in that window; extra copies only multiplied the reads, and the phone
+     * counts every NodeInfo read as another node. */
+    ASSERT_EQ_INT(reply.count, 2);
+    ASSERT_EQ_INT(reply.messages[0].data[0] >> 3, FROMRADIO_FIELD_NODE_INFO);
+    ASSERT_TRUE(has_varint_field(
+        reply.messages[1].data, reply.messages[1].len, FROMRADIO_FIELD_CONFIG_COMPLETE_ID, &value));
+    ASSERT_EQ_INT(value, PHONE_NONCE_NODE_INFO);
 
     ASSERT_TRUE(handshake_is_complete(&h));
 }
@@ -457,6 +461,286 @@ TEST(test_no_reply_when_none_wanted) {
     ASSERT_EQ_INT(phone_encode_admin_reply(&pid, &req, passkey, out, sizeof(out)), 0);
 }
 
+/* Heartbeat, answered with a queueStatus as PhoneAPI.cpp does. */
+
+static size_t make_heartbeat(uint32_t nonce, uint8_t* buf, size_t cap) {
+    uint8_t hb[8];
+    PbWriter w;
+    pb_writer_init(&w, hb, sizeof(hb));
+    pb_write_varint_field(&w, 1, nonce);
+    size_t hb_len = pb_writer_len(&w);
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_HEARTBEAT, hb, hb_len);
+    return pb_writer_len(&w);
+}
+
+TEST(test_heartbeat_gets_one_queue_status) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+    uint64_t value = 0;
+
+    handshake_init(&h, &id);
+    /* The nonce iOS sends is random in 2...UInt32.max. */
+    size_t len = make_heartbeat(0x9e3779b9u, to_radio, sizeof(to_radio));
+
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    /* Tag byte: FromRadio field 11, wire type 2. */
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+    ASSERT_EQ_INT(reply.messages[0].data[1], reply.messages[0].len - 2);
+
+    const uint8_t* qs = reply.messages[0].data + 2;
+    size_t qs_len = reply.messages[0].len - 2;
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 2, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_FREE_REPORT);
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 3, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_MAXLEN_REPORT);
+    /* res 0 and mesh_packet_id 0 are defaults and left out. */
+    ASSERT_TRUE(!has_varint_field(qs, qs_len, 1, &value));
+    ASSERT_TRUE(!has_varint_field(qs, qs_len, 4, &value));
+
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeIdle);
+}
+
+TEST(test_heartbeat_without_nonce_is_answered) {
+    /* Nonce absent means nonce 0, the firmware's plain keepalive. */
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+
+    handshake_init(&h, &id);
+    size_t len = make_heartbeat(0, to_radio, sizeof(to_radio));
+    ASSERT_EQ_INT(len, 2);
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+}
+
+TEST(test_heartbeat_nonce_one_gets_nothing) {
+    /* Nonce 1 is the firmware's NodeInfo broadcast trigger, not a keepalive.
+     * It is understood, so true, but nothing goes back to the phone. */
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+
+    handshake_init(&h, &id);
+    size_t len = make_heartbeat(1, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 0);
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeIdle);
+}
+
+TEST(test_heartbeat_does_not_move_the_stage) {
+    /* The connect flow sends a heartbeat between the two stages. It must not
+     * disturb where the handshake is. */
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[16];
+
+    handshake_init(&h, &id);
+    size_t len = make_want_config(PHONE_NONCE_CONFIG, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeConfigRequested);
+
+    len = make_heartbeat(0x12345678u, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeConfigRequested);
+
+    len = make_want_config(PHONE_NONCE_NODE_INFO, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    len = make_heartbeat(0x12345679u, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeComplete);
+}
+
+/* Any other packet from the phone is acknowledged with a queueStatus carrying
+ * its id, MeshService.cpp sendToMesh. */
+
+static size_t make_text_message(uint32_t packet_id, uint8_t* buf, size_t cap) {
+    uint8_t data[32];
+    uint8_t packet[64];
+    PbWriter w;
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, 1, 1); /* portnum TEXT_MESSAGE_APP */
+    pb_write_string_field(&w, 2, "hi");
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, 2, 0xFFFFFFFFu); /* to broadcast */
+    pb_write_submessage(&w, 4, data, data_len);
+    pb_write_fixed32_field_always(&w, 6, packet_id);
+    size_t packet_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, TORADIO_FIELD_PACKET, packet, packet_len);
+    return pb_writer_len(&w);
+}
+
+TEST(test_text_message_gets_queue_status_with_its_id) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[96];
+    uint64_t value = 0;
+
+    handshake_init(&h, &id);
+    size_t len = make_text_message(0x01020304u, to_radio, sizeof(to_radio));
+
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_QUEUE_STATUS << 3) | 2);
+    ASSERT_EQ_INT(reply.messages[0].data[1], reply.messages[0].len - 2);
+
+    const uint8_t* qs = reply.messages[0].data + 2;
+    size_t qs_len = reply.messages[0].len - 2;
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 4, &value));
+    ASSERT_EQ_INT(value, 0x01020304u);
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 2, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_FREE_REPORT);
+    ASSERT_TRUE(has_varint_field(qs, qs_len, 3, &value));
+    ASSERT_EQ_INT(value, HANDSHAKE_QUEUE_MAXLEN_REPORT);
+    ASSERT_TRUE(!has_varint_field(qs, qs_len, 1, &value));
+    ASSERT_EQ_INT(handshake_stage(&h), HandshakeIdle);
+}
+
+TEST(test_malformed_packet_gets_nothing) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[96];
+
+    handshake_init(&h, &id);
+    size_t len = make_text_message(0x01020304u, to_radio, sizeof(to_radio));
+    /* Cut the id short: the packet's declared length no longer fits. */
+    ASSERT_TRUE(!handshake_handle_to_radio(&h, to_radio, len - 2, &reply));
+    ASSERT_EQ_INT(reply.count, 0);
+}
+
+TEST(test_admin_packet_gets_admin_reply_not_queue_status) {
+    Handshake h;
+    MeshConfig id = identity();
+    HandshakeReply reply;
+    uint8_t to_radio[128];
+
+    handshake_init(&h, &id);
+    size_t len = make_get_owner(0xAABBCCDDu, 0x11223344u, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_EQ_INT(reply.count, 1);
+    /* FromRadio.packet, field 2, not queueStatus. */
+    ASSERT_EQ_INT(reply.messages[0].data[0], (FROMRADIO_FIELD_PACKET << 3) | 2);
+}
+
+/* ToRadio { packet { decoded { portnum: ADMIN_APP, payload: AdminMessage {
+ * <field>: true }, want_response }, from, id } }, for any admin request. */
+static size_t
+    make_admin_request(uint32_t field, uint32_t packet_id, uint32_t from, uint8_t* buf, size_t cap) {
+    uint8_t admin[16];
+    uint8_t data[64];
+    uint8_t packet[96];
+    PbWriter w;
+
+    pb_writer_init(&w, admin, sizeof(admin));
+    pb_write_varint_field_always(&w, field, 1);
+    size_t admin_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, 1, 6); /* portnum ADMIN_APP */
+    pb_write_bytes_field(&w, 2, admin, admin_len);
+    pb_write_varint_field_always(&w, 3, 1); /* want_response */
+    size_t data_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, 1, from);
+    pb_write_submessage(&w, 4, data, data_len);
+    pb_write_fixed32_field_always(&w, 6, packet_id);
+    size_t packet_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, buf, cap);
+    pb_write_submessage(&w, 1, packet, packet_len);
+    return pb_writer_len(&w);
+}
+
+/* The phone reads each FromRadio once, at most PHONE_FRAME_MAX bytes, and
+ * disconnects on a frame that does not decode. Every reply the handshake can
+ * produce, with the longest names the config record holds, must fit. */
+TEST(test_every_reply_fits_one_phone_read) {
+    Handshake h;
+    MeshConfig cfg;
+    HandshakeReply reply;
+    uint8_t to_radio[128];
+    size_t largest = 0;
+    const uint8_t passkey[PHONE_SESSION_PASSKEY_LEN] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    const uint32_t admin_fields[] = {
+        ADMIN_GET_OWNER_REQUEST,
+        ADMIN_GET_CANNED_REQUEST,
+        ADMIN_GET_RINGTONE_REQUEST,
+        ADMIN_SET_CONFIG};
+
+    ASSERT_EQ_INT(HANDSHAKE_MAX_MESSAGE, PHONE_FRAME_MAX);
+
+    mesh_config_defaults(&cfg, 0xFFFFFFFF);
+    ASSERT_TRUE(mesh_config_set_long_name(&cfg, "0123456789012345678901234567890123456789"));
+    ASSERT_TRUE(mesh_config_set_short_name(&cfg, "WXYZV"));
+    handshake_init(&h, &cfg);
+    handshake_set_session_passkey(&h, passkey);
+
+    size_t len = make_want_config(PHONE_NONCE_CONFIG, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_TRUE(reply.count > 0);
+    for(size_t i = 0; i < reply.count; i++) {
+        ASSERT_TRUE(reply.messages[i].len <= PHONE_FRAME_MAX);
+        if(reply.messages[i].len > largest) largest = reply.messages[i].len;
+    }
+
+    len = make_want_config(PHONE_NONCE_NODE_INFO, to_radio, sizeof(to_radio));
+    ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+    ASSERT_TRUE(reply.count > 0);
+    for(size_t i = 0; i < reply.count; i++) {
+        ASSERT_TRUE(reply.messages[i].len <= PHONE_FRAME_MAX);
+        if(reply.messages[i].len > largest) largest = reply.messages[i].len;
+    }
+
+    for(size_t f = 0; f < sizeof(admin_fields) / sizeof(admin_fields[0]); f++) {
+        len = make_admin_request(
+            admin_fields[f], 0xFFFFFFFF, 0xFFFFFFFF, to_radio, sizeof(to_radio));
+        ASSERT_TRUE(handshake_handle_to_radio(&h, to_radio, len, &reply));
+        ASSERT_EQ_INT(reply.count, 1);
+        ASSERT_TRUE(reply.messages[0].len <= PHONE_FRAME_MAX);
+        if(reply.messages[0].len > largest) largest = reply.messages[0].len;
+    }
+
+    printf(
+        "  largest handshake reply with maximal names: %u of %d\n",
+        (unsigned)largest,
+        PHONE_FRAME_MAX);
+}
+
+/* Every handshake encoder writes into a HandshakeMessage with out_len
+ * HANDSHAKE_MAX_MESSAGE, and push() refuses a zero length. So a frame past
+ * the cap is refused at the source, not truncated into one the phone would
+ * read as garbage. */
+TEST(test_frame_past_the_read_limit_is_refused) {
+    HandshakeMessage msg;
+    uint8_t payload[186];
+    uint8_t wide[256];
+
+    memset(payload, 'x', sizeof(payload));
+    /* 189 bytes with room to build it: over the cap. */
+    ASSERT_EQ_INT(phone_encode_packet(payload, sizeof(payload), wide, sizeof(wide)), 189);
+    /* In a handshake message slot it is refused outright. */
+    ASSERT_EQ_INT(
+        phone_encode_packet(payload, sizeof(payload), msg.data, HANDSHAKE_MAX_MESSAGE), 0);
+    ASSERT_EQ_INT(sizeof(msg.data), PHONE_FRAME_MAX);
+}
+
 TEST_MAIN_BEGIN()
 RUN_TEST(test_starts_idle);
 RUN_TEST(test_stage_one_follows_the_firmware_order);
@@ -477,4 +761,13 @@ RUN_TEST(test_real_canned_message_request_is_recognised);
 RUN_TEST(test_every_observed_request_is_answered);
 RUN_TEST(test_no_reply_when_none_wanted);
 RUN_TEST(test_tolerates_null);
+RUN_TEST(test_heartbeat_gets_one_queue_status);
+RUN_TEST(test_heartbeat_without_nonce_is_answered);
+RUN_TEST(test_heartbeat_nonce_one_gets_nothing);
+RUN_TEST(test_heartbeat_does_not_move_the_stage);
+RUN_TEST(test_text_message_gets_queue_status_with_its_id);
+RUN_TEST(test_malformed_packet_gets_nothing);
+RUN_TEST(test_admin_packet_gets_admin_reply_not_queue_status);
+RUN_TEST(test_every_reply_fits_one_phone_read);
+RUN_TEST(test_frame_past_the_read_limit_is_refused);
 TEST_MAIN_END()

@@ -7,8 +7,11 @@
 #include "src/model/mesh_event.h"
 #include "src/proto/mesh_user.h"
 #include "src/ble/meshtastic_profile.h"
+#include "src/ble/meshtastic_service.h"
 #include "src/radio/source_radio.h"
 #include "src/ui/app_view.h"
+
+#define TAG "MeshApp"
 
 /* The primary channel. Meshtastic's default channel has an empty name and the
  * preset name is used for the hash, so "LongFast" is the string that produces
@@ -48,6 +51,56 @@ static bool signal_callback(uint32_t signal, void* arg, void* context) {
  * look live during a connection, slow enough that an idle app is not
  * repainting the screen for no reason. */
 #define UI_REFRESH_MS 250
+
+/* Hands a received packet to the phone as FromRadio.packet. Radio thread.
+ *
+ * Which packets qualify is decided by phone_rx_packet_from_decoded, which is
+ * host-tested: only ones that decrypted to valid Data.
+ *
+ * Called with the app mutex released. queue() takes the service mutex, and
+ * the BLE worker takes the app mutex on its own to copy the roster, so
+ * holding one while taking the other here would be a lock order waiting to
+ * deadlock. */
+static void forward_to_phone(MeshApp* app, MeshDecodeResult result) {
+    PhoneRxPacket packet;
+
+    if(app->ble == NULL || !meshtastic_ble_service_is_connected(app->ble)) return;
+    if(!phone_rx_packet_from_decoded(
+           &app->rx_decoded, result, (float)app->rx_frame.snr, app->rx_frame.rssi, &packet)) {
+        return;
+    }
+    /* rx_time stays 0 rather than coming from the Flipper's RTC, whose
+     * accuracy nothing here can vouch for. The phone stamps a 0 with its own
+     * clock (MeshPackets.swift textMessageAppPacket, messageTimestamp). */
+
+    size_t len = phone_encode_rx_packet(&packet, app->phone_frame, sizeof(app->phone_frame));
+    if(len == 0) {
+        FURI_LOG_W(
+            TAG,
+            "rx packet from %08lx too large for the phone, %u bytes dropped",
+            (unsigned long)packet.from,
+            (unsigned)packet.payload_len);
+        return;
+    }
+
+    /* Queueing arms the drain, and the drain rings FromNum on the first
+     * publish of a batch (drain_step, doorbell_rung), so this is all it
+     * takes to wake the phone. */
+    if(!meshtastic_ble_service_queue(app->ble, app->phone_frame, len)) {
+        FURI_LOG_W(
+            TAG,
+            "rx packet from %08lx not forwarded, phone queue full",
+            (unsigned long)packet.from);
+        return;
+    }
+
+    FURI_LOG_I(
+        TAG,
+        "rx packet from %08lx port %u forwarded to phone, %u bytes",
+        (unsigned long)packet.from,
+        (unsigned)packet.portnum,
+        (unsigned)len);
+}
 
 static int32_t radio_thread(void* context) {
     MeshApp* app = context;
@@ -110,6 +163,8 @@ static int32_t radio_thread(void* context) {
 
         furi_mutex_release(app->mutex);
 
+        forward_to_phone(app, result);
+
         view_port_update(app->view_port);
     }
 
@@ -149,6 +204,9 @@ MeshApp* mesh_app_alloc(void) {
     /* Real devices show the last two bytes of the BLE MAC here. */
     snprintf(app->ble_id, sizeof(app->ble_id), "%02x%02x", mac[4], mac[5]);
     app->ble = meshtastic_ble_start(&app->config);
+    /* Stage two sends the heard nodes. The roster is guarded by app->mutex,
+     * which the service takes to copy it. */
+    if(app->ble) meshtastic_ble_service_set_roster(app->ble, &app->roster, app->mutex);
 
     app->input_queue = furi_message_queue_alloc(8, sizeof(InputEvent));
     app->view_port = view_port_alloc();

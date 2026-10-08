@@ -34,5 +34,12 @@ App(
             sources=["aes.c"],
             cdefines=["CBC=0", "ECB=0", "CTR=1"],
         ),
+        # X25519 extracted from TweetNaCl for direct messages. Kept under lib/
+        # so lint leaves the upstream code as it was written.
+        Lib(
+            name="tweetnacl",
+            fap_include_paths=["."],
+            sources=["mesh_x25519.c"],
+        ),
     ],
 )

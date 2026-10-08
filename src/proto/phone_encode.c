@@ -12,12 +12,19 @@
 #define MYNODEINFO_FIELD_PIO_ENV         13
 
 /* NodeInfo field numbers. mesh.proto, message NodeInfo. */
-#define NODEINFO_FIELD_NUM       1
+#define NODEINFO_FIELD_NUM         1
 /* mesh.proto MeshPacket. from, to and id are fixed32, not varint. */
-#define MESHPACKET_FIELD_FROM    1
-#define MESHPACKET_FIELD_TO      2
-#define MESHPACKET_FIELD_DECODED 4
-#define MESHPACKET_FIELD_ID      6
+#define MESHPACKET_FIELD_FROM      1
+#define MESHPACKET_FIELD_TO        2
+#define MESHPACKET_FIELD_CHANNEL   3
+#define MESHPACKET_FIELD_DECODED   4
+#define MESHPACKET_FIELD_ID        6
+#define MESHPACKET_FIELD_RX_TIME   7
+#define MESHPACKET_FIELD_RX_SNR    8
+#define MESHPACKET_FIELD_HOP_LIMIT 9
+#define MESHPACKET_FIELD_WANT_ACK  10
+#define MESHPACKET_FIELD_RX_RSSI   12
+#define MESHPACKET_FIELD_HOP_START 15
 
 /* mesh.proto Data. dest, source and request_id are fixed32. */
 #define DATA_FIELD_PORTNUM       1
@@ -33,7 +40,10 @@
 #define ADMIN_FIELD_GET_OWNER_RESPONSE 4
 #define ADMIN_FIELD_SESSION_PASSKEY    101
 
-#define NODEINFO_FIELD_USER 2
+#define NODEINFO_FIELD_USER       2
+#define NODEINFO_FIELD_SNR        4
+#define NODEINFO_FIELD_LAST_HEARD 5
+#define NODEINFO_FIELD_HOPS_AWAY  9
 
 /* mesh.proto, message DeviceMetadata. */
 #define METADATA_FIELD_FIRMWARE_VERSION     1
@@ -46,8 +56,24 @@
  * The app parses it as a version string and uses it to decide whether the
  * device is supported. It is a claim about protocol compatibility, not about
  * this being Meshtastic firmware, and it is deliberately a version whose phone
- * protocol this app actually implements. */
-#define PHONE_FIRMWARE_VERSION "2.5.0"
+ * protocol this app actually implements.
+ *
+ * Four dotted parts, and at least 2.5.18 once the last part is dropped.
+ * Meshtastic-Apple v2.7.21 connect Step 6 takes everything before the last
+ * "." (AccessoryManager+Connect.swift), so a build suffix is expected and
+ * this reads as "2.6.11". It then compares that against minimumVersion,
+ * "2.5.18" (AccessoryManager.swift:128), and throws connectionFailed when it
+ * is lower. Step 0 calls closeConnection() before each retry, so a failure
+ * here shows up on the device as a phone-initiated disconnect (HCI 0x13)
+ * every few seconds, with maxRetries 2 and retryDelay 2s.
+ *
+ * The old value "2.5.0" had three parts and read as "2.5", below the floor.
+ *
+ * Ceiling: stay under 2.7.4 until this build answers ToRadio.heartbeat with a
+ * FromRadio.queueStatus. From 2.7.4 the app arms a heartbeat response
+ * watchdog (AccessoryManager.swift, checkIsVersionSupported("2.7.4")). That
+ * watchdog is TCP/serial only today, but do not lean on that. */
+#define PHONE_FIRMWARE_VERSION "2.6.11.flipper"
 
 /* device_state_version tracks the on-device database layout. The app only
  * compares it, so any stable value works; this one matches what the 2.5 series
@@ -151,6 +177,186 @@ size_t phone_encode_packet(
     pb_write_submessage(&frame, FROMRADIO_FIELD_PACKET, mesh_packet, packet_len);
 
     return pb_writer_ok(&frame) ? pb_writer_len(&frame) : 0;
+}
+
+/* mesh.pb.h, QueueStatus. */
+#define QUEUESTATUS_FIELD_RES            1
+#define QUEUESTATUS_FIELD_FREE           2
+#define QUEUESTATUS_FIELD_MAXLEN         3
+#define QUEUESTATUS_FIELD_MESH_PACKET_ID 4
+
+size_t phone_encode_queue_status(
+    int32_t res,
+    uint32_t free_slots,
+    uint32_t maxlen,
+    uint32_t mesh_packet_id,
+    uint8_t* out,
+    size_t out_len) {
+    uint8_t body[32];
+    PbWriter inner;
+    PbWriter frame;
+
+    if(out == NULL) return 0;
+
+    pb_writer_init(&inner, body, sizeof(body));
+    /* Sign extended to 64 bits before the cast, which is what protobuf does
+     * with a negative int32: -1 becomes ten bytes, not five. */
+    pb_write_varint_field(&inner, QUEUESTATUS_FIELD_RES, (uint64_t)(int64_t)res);
+    pb_write_varint_field_always(&inner, QUEUESTATUS_FIELD_FREE, free_slots);
+    pb_write_varint_field_always(&inner, QUEUESTATUS_FIELD_MAXLEN, maxlen);
+    pb_write_varint_field(&inner, QUEUESTATUS_FIELD_MESH_PACKET_ID, mesh_packet_id);
+    if(!pb_writer_ok(&inner)) return 0;
+
+    pb_writer_init(&frame, out, out_len);
+    pb_write_submessage(&frame, FROMRADIO_FIELD_QUEUE_STATUS, body, pb_writer_len(&inner));
+
+    return pb_writer_ok(&frame) ? pb_writer_len(&frame) : 0;
+}
+
+/* A float's IEEE 754 bits, for a wire type 5 field. memcpy rather than a
+ * pointer cast, so strict aliasing cannot reorder it. */
+static uint32_t float_bits(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+size_t phone_encode_rx_packet(const PhoneRxPacket* p, uint8_t* out, size_t out_len) {
+    uint8_t data[PHONE_READ_MAX];
+    uint8_t packet[PHONE_READ_MAX];
+    PbWriter w;
+
+    if(p == NULL || out == NULL) return 0;
+    if(p->payload == NULL && p->payload_len > 0) return 0;
+
+    /* Scratch buffers are capped at PHONE_READ_MAX, so a payload that could
+     * never fit in one read fails here rather than being built and dropped. */
+    pb_writer_init(&w, data, sizeof(data));
+    pb_write_varint_field_always(&w, DATA_FIELD_PORTNUM, p->portnum);
+    pb_write_bytes_field(&w, DATA_FIELD_PAYLOAD, p->payload, p->payload_len);
+    if(!pb_writer_ok(&w)) return 0;
+    size_t data_len = pb_writer_len(&w);
+
+    /* Field numbers and types from mesh.pb.h, MeshPacket. from, to, id and
+     * rx_time are fixed32 and written even when zero: a zero id is still an
+     * id. rx_snr is a float, so wire type 5 carrying its bits. rx_rssi is an
+     * int32 varint, so a negative value is sign extended to ten bytes. */
+    pb_writer_init(&w, packet, sizeof(packet));
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_FROM, p->from);
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_TO, p->to);
+    pb_write_varint_field(&w, MESHPACKET_FIELD_CHANNEL, p->channel);
+    pb_write_submessage(&w, MESHPACKET_FIELD_DECODED, data, data_len);
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_ID, p->id);
+    pb_write_fixed32_field_always(&w, MESHPACKET_FIELD_RX_TIME, p->rx_time);
+    pb_write_fixed32_field(&w, MESHPACKET_FIELD_RX_SNR, float_bits(p->rx_snr));
+    pb_write_varint_field(&w, MESHPACKET_FIELD_HOP_LIMIT, p->hop_limit);
+    pb_write_varint_field(&w, MESHPACKET_FIELD_WANT_ACK, p->want_ack ? 1 : 0);
+    /* rx_rssi has explicit presence in the firmware, which marks a real
+     * reading present (SX126xInterface.cpp, has_rx_rssi = true), so it is
+     * written whatever its value. */
+    pb_write_varint_field_always(&w, MESHPACKET_FIELD_RX_RSSI, (uint64_t)(int64_t)p->rx_rssi);
+    pb_write_varint_field(&w, MESHPACKET_FIELD_HOP_START, p->hop_start);
+    if(!pb_writer_ok(&w)) return 0;
+
+    size_t written = phone_encode_packet(packet, pb_writer_len(&w), out, out_len);
+    return written > PHONE_READ_MAX ? 0 : written;
+}
+
+bool phone_rx_packet_from_decoded(
+    const MeshDecoded* d,
+    MeshDecodeResult result,
+    float rx_snr,
+    int32_t rx_rssi,
+    PhoneRxPacket* out) {
+    if(d == NULL || out == NULL) return false;
+    memset(out, 0, sizeof(*out));
+
+    /* The client dispatches on packet.decoded.portnum (AccessoryManager.swift
+     * processFromRadio, case .packet), so only a packet that decrypted to
+     * valid Data is any use to it. */
+    if(result != MESH_OK && result != MESH_ERR_NOT_TEXT) return false;
+    if(d->data.portnum == 0) return false;
+
+    out->from = d->header.from;
+    out->to = d->header.to;
+    out->id = d->header.id;
+    /* The index of the channel that decrypted it, not the hash on the air.
+     * Only the primary channel is decoded, and that is index 0. */
+    out->channel = 0;
+    out->portnum = d->data.portnum;
+    out->payload = d->data.payload;
+    out->payload_len = d->data.payload_len;
+    out->rx_snr = rx_snr;
+    out->rx_rssi = rx_rssi;
+    /* RadioLibInterface.cpp handleReceiveInterrupt reads both out of the
+     * header flags, which is what these helpers do. */
+    out->hop_limit = mesh_header_hop_limit(&d->header);
+    out->hop_start = mesh_header_hop_start(&d->header);
+    out->want_ack = mesh_header_want_ack(&d->header);
+    return true;
+}
+
+/* Length of a name held in a fixed array, bounded by the array, so a record
+ * that lost its terminator cannot run the writer off the end of it. */
+static size_t name_len(const char* s, size_t cap) {
+    size_t n = 0;
+    while(n < cap && s[n] != 0)
+        n++;
+    return n;
+}
+
+size_t phone_encode_other_node_info(
+    const MeshNode* node,
+    uint32_t last_heard_unix,
+    uint8_t* out,
+    size_t out_len) {
+    char id[PHONE_ID_MAX];
+    uint8_t user[96];
+    uint8_t body[128];
+    PbWriter w;
+
+    if(node == NULL || out == NULL || node->node_num == 0) return 0;
+
+    /* The id is written even for a node with no name yet, so the phone gets a
+     * user record (handleNodeInfo reads nodeInfo.hasUser) and has something to
+     * show. The firmware does the same: STATE_SEND_OTHER_NODEINFOS in
+     * PhoneAPI.cpp rewrites user.id to "!%08x" before sending. hw_model is
+     * left out because the roster does not keep it; 0 is HW_UNSET anyway. */
+    snprintf(id, sizeof(id), "!%08lx", (unsigned long)node->node_num);
+    pb_writer_init(&w, user, sizeof(user));
+    pb_write_string_field(&w, USER_FIELD_ID, id);
+    if(node->has_name) {
+        pb_write_bytes_field(
+            &w,
+            USER_FIELD_LONG_NAME,
+            (const uint8_t*)node->long_name,
+            name_len(node->long_name, sizeof(node->long_name)));
+        pb_write_bytes_field(
+            &w,
+            USER_FIELD_SHORT_NAME,
+            (const uint8_t*)node->short_name,
+            name_len(node->short_name, sizeof(node->short_name)));
+    }
+    if(!pb_writer_ok(&w)) return 0;
+    size_t user_len = pb_writer_len(&w);
+
+    /* mesh.pb.h NodeInfo: snr is a float, last_heard a fixed32, hops_away an
+     * optional uint32. hops_away 0 means a direct neighbour, which is a real
+     * answer, so it is written whenever it is known. */
+    pb_writer_init(&w, body, sizeof(body));
+    pb_write_varint_field_always(&w, NODEINFO_FIELD_NUM, node->node_num);
+    pb_write_submessage(&w, NODEINFO_FIELD_USER, user, user_len);
+    pb_write_fixed32_field(&w, NODEINFO_FIELD_SNR, float_bits((float)node->snr));
+    pb_write_fixed32_field(&w, NODEINFO_FIELD_LAST_HEARD, last_heard_unix);
+    if(node->has_hops) {
+        pb_write_varint_field_always(&w, NODEINFO_FIELD_HOPS_AWAY, node->hops_away);
+    }
+    if(!pb_writer_ok(&w)) return 0;
+    size_t body_len = pb_writer_len(&w);
+
+    pb_writer_init(&w, out, out_len);
+    pb_write_submessage(&w, FROMRADIO_FIELD_NODE_INFO, body, body_len);
+    return pb_writer_ok(&w) ? pb_writer_len(&w) : 0;
 }
 
 /* Reads a base 128 varint and advances *pos. */
@@ -415,6 +621,104 @@ bool phone_decode_want_config_id(const uint8_t* buf, size_t len, uint32_t* nonce
     return found;
 }
 
+/* mesh.pb.h, Heartbeat. */
+#define HEARTBEAT_FIELD_NONCE 1
+
+/* True when every field in a message has a legal tag and fits. scan_field
+ * reports "absent" and "malformed" the same way, and a heartbeat needs them
+ * apart: an absent nonce is 0, a malformed one is not a heartbeat at all.
+ *
+ * When want_fixed32 is non-zero, a field of that number with wire type 5 is
+ * reported through fixed32 and found. scan_field reads a varint and a fixed32
+ * into the same value, and MeshPacket.id is only valid as the latter. */
+static bool message_well_formed(
+    const uint8_t* buf,
+    size_t len,
+    uint32_t want_fixed32,
+    uint32_t* fixed32,
+    bool* found) {
+    size_t pos = 0;
+
+    while(pos < len) {
+        uint64_t tag;
+        uint64_t value;
+        if(!read_varint(buf, len, &pos, &tag)) return false;
+        if((tag >> 3) == 0) return false;
+
+        if(want_fixed32 != 0 && (tag >> 3) == want_fixed32 && (tag & 0x07) == 5 &&
+           len - pos >= 4) {
+            *fixed32 = (uint32_t)buf[pos] | ((uint32_t)buf[pos + 1] << 8) |
+                       ((uint32_t)buf[pos + 2] << 16) | ((uint32_t)buf[pos + 3] << 24);
+            *found = true;
+        }
+
+        switch(tag & 0x07) {
+        case 0:
+            if(!read_varint(buf, len, &pos, &value)) return false;
+            break;
+        case 1:
+            if(len - pos < 8) return false;
+            pos += 8;
+            break;
+        case 2:
+            if(!read_varint(buf, len, &pos, &value)) return false;
+            if(value > (uint64_t)(len - pos)) return false;
+            pos += (size_t)value;
+            break;
+        case 5:
+            if(len - pos < 4) return false;
+            pos += 4;
+            break;
+        default:
+            return false;
+        }
+    }
+    return true;
+}
+
+bool phone_decode_heartbeat(const uint8_t* buf, size_t len, uint32_t* nonce) {
+    const uint8_t* hb = NULL;
+    size_t hb_len = 0;
+    size_t pos = 0;
+    uint64_t tag;
+    uint64_t value = 0;
+
+    if(buf == NULL || nonce == NULL || len == 0) return false;
+
+    /* ToRadio.payload_variant is a oneof, so the first field is what was sent. */
+    if(!read_varint(buf, len, &pos, &tag)) return false;
+    if(tag != (((uint64_t)TORADIO_FIELD_HEARTBEAT << 3) | 2)) return false;
+
+    if(!scan_field(buf, len, TORADIO_FIELD_HEARTBEAT, &hb, &hb_len, NULL)) return false;
+    if(!message_well_formed(hb, hb_len, 0, NULL, NULL)) return false;
+
+    *nonce = 0;
+    if(scan_field(hb, hb_len, HEARTBEAT_FIELD_NONCE, NULL, NULL, &value)) {
+        *nonce = (uint32_t)value;
+    }
+    return true;
+}
+
+bool phone_decode_packet_id(const uint8_t* to_radio, size_t len, uint32_t* id) {
+    const uint8_t* packet = NULL;
+    size_t packet_len = 0;
+    uint32_t value = 0;
+    bool found = false;
+
+    if(to_radio == NULL || id == NULL) return false;
+
+    if(!scan_field(to_radio, len, TORADIO_FIELD_PACKET, &packet, &packet_len, NULL)) {
+        return false;
+    }
+    if(!message_well_formed(packet, packet_len, MESHPACKET_FIELD_ID, &value, &found)) {
+        return false;
+    }
+    if(!found) return false;
+
+    *id = value;
+    return true;
+}
+
 size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_t out_len) {
     uint8_t body[64];
     PbWriter meta;
@@ -445,6 +749,22 @@ size_t phone_encode_device_metadata(const PhoneIdentity* id, uint8_t* out, size_
 #define CHANNEL_SETTINGS_FIELD_PSK  2
 #define CHANNEL_SETTINGS_FIELD_NAME 3
 #define CHANNEL_ROLE_PRIMARY        1
+
+/* config.proto: Config.device is 1 and DeviceConfig.tzdef is 11. Checked
+ * against the firmware's generated config.pb.h: meshtastic_Config_device_tag 1,
+ * meshtastic_Config_DeviceConfig_tzdef_tag 11. */
+#define CONFIG_FIELD_DEVICE      1
+#define DEVICECONFIG_FIELD_TZDEF 11
+
+/* A POSIX TZ string: zone name "UTC", zero offset, no daylight saving rule.
+ * The firmware stores exactly this kind of string in DeviceConfig.tzdef
+ * (config.pb.h: "POSIX Timezone definition string", char tzdef[65]).
+ *
+ * It is sent so the field is not empty. The iOS app's handleConfig
+ * (AccessoryManager+FromRadio.swift:359, v2.7.21) writes set_config with the
+ * phone's own timezone whenever device.tzdef is empty, on every read of the
+ * device variant. Once it is non-empty the phone stops sending that write. */
+#define PHONE_TZDEF "UTC0"
 
 /* config.proto: Config.lora is 6, and the LoRaConfig fields below. */
 #define CONFIG_FIELD_LORA       6
@@ -595,6 +915,25 @@ size_t phone_encode_lora_config(uint32_t channel_num, uint8_t* out, size_t out_l
     if(!pb_writer_ok(&msg)) return 0;
 
     return pb_writer_len(&msg);
+}
+
+size_t phone_encode_device_config(uint8_t* out, size_t out_len) {
+    uint8_t device[32];
+    PbWriter device_writer;
+
+    if(out == NULL) return 0;
+
+    pb_writer_init(&device_writer, device, sizeof(device));
+    pb_write_string_field(&device_writer, DEVICECONFIG_FIELD_TZDEF, PHONE_TZDEF);
+    if(!pb_writer_ok(&device_writer)) return 0;
+
+    return encode_variant(
+        FROMRADIO_FIELD_CONFIG,
+        CONFIG_FIELD_DEVICE,
+        device,
+        pb_writer_len(&device_writer),
+        out,
+        out_len);
 }
 
 size_t phone_encode_get_owner_response(
