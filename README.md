@@ -46,7 +46,7 @@ Required:
 
 Testing also requires a second Meshtastic node to transmit against.
 
-The board fixes the pin assignments. `docs/superpowers/specs/` lists them all.
+The board fixes the pin assignments, which are defined in `src/radio/sx126x.c`.
 Two differ from the common examples:
 
 - BUSY is PB7, header pin 14. It is not PB2.
@@ -89,7 +89,7 @@ src/ui/        Drawing.
 test/host/     PC tests.
 test/tools/    Test vector generator.
 lib/           Third party code.
-docs/          Feasibility analysis, measurements, spec and plans.
+docs/          Feasibility analysis, phone protocol, measurements.
 ```
 
 `src/proto/` must not include a Flipper header, and must not allocate. CI
